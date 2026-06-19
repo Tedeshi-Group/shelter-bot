@@ -77,6 +77,9 @@ async def on_ready():
     try:
         await bot.load_extension("cogs.voice_channels")
         logging.getLogger(__name__).info("VoiceChannels Cog loaded")
+        voice_cog = bot.get_cog("VoiceChannels")
+        if voice_cog:
+            await voice_cog._ensure_new_voice_exists()
     except Exception as e:
         logging.getLogger(__name__).error("Failed to load VoiceChannels Cog: %s", e)
 
