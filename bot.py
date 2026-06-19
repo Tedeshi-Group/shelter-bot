@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -9,6 +10,12 @@ from sqlalchemy import select, func
 from config import DATABASE_URL
 from database import Base, engine, SessionLocal
 from models import User, VoiceSession
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 load_dotenv()
 
