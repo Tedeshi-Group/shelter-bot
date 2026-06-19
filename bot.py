@@ -74,7 +74,11 @@ async def on_ready():
     bot.tree.copy_global_to(guild=guild)
     await bot.tree.sync(guild=guild)
 
-    await bot.load_extension("cogs.voice_channels")
+    try:
+        await bot.load_extension("cogs.voice_channels")
+        logging.getLogger(__name__).info("VoiceChannels Cog loaded")
+    except Exception as e:
+        logging.getLogger(__name__).error("Failed to load VoiceChannels Cog: %s", e)
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     db = SessionLocal()
