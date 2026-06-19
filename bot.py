@@ -1,4 +1,3 @@
-import logging
 import os
 from datetime import datetime, timezone
 
@@ -10,12 +9,6 @@ from sqlalchemy import select, func
 from config import DATABASE_URL
 from database import Base, engine, SessionLocal
 from models import User, VoiceSession
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
 
 load_dotenv()
 
@@ -76,12 +69,11 @@ async def on_ready():
 
     try:
         await bot.load_extension("cogs.voice_channels")
-        logging.getLogger(__name__).info("VoiceChannels Cog loaded")
         voice_cog = bot.get_cog("VoiceChannels")
         if voice_cog:
             await voice_cog._ensure_new_voice_exists()
-    except Exception as e:
-        logging.getLogger(__name__).error("Failed to load VoiceChannels Cog: %s", e)
+    except Exception:
+        pass
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     db = SessionLocal()
