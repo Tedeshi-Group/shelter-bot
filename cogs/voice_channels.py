@@ -111,11 +111,6 @@ class VoiceChannels(commands.Cog):
                 if before.channel is None or before.channel.id != after.channel.id:
                     await self._log_event(after.channel, f"🚪 **{member.display_name}** вошёл в войс")
 
-                if before.channel and before.channel.id == after.channel.id:
-                    if before.rtc_region != after.rtc_region:
-                        region_name = after.rtc_region or "auto"
-                        await self._log_event(after.channel, f"🌍 Регион изменён на **{region_name}** (пользователь: **{member.display_name}**)")
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot:
