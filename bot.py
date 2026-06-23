@@ -6,8 +6,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from sqlalchemy import select, func
 
-from config import DATABASE_URL
-from database import Base, engine, SessionLocal
+from database import SessionLocal
 from models import User, VoiceSession
 
 load_dotenv()
