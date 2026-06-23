@@ -208,4 +208,45 @@ async def stats(interaction: discord.Interaction):
         db.close()
 
 
+@bot.tree.command(name='time', description='Показать время пользователя в голосовых каналах')
+async def time(interaction: discord.Interaction, user: discord.Member = None):
+    if user is None:
+        user = interaction.user
+
+    db = SessionLocal()
+    try:
+        result = db.execute(
+            select(
+                func.coalesce(func.sum(VoiceSession.duration_seconds), 0).label('total_seconds'),
+            )
+            .where(VoiceSession.user_discord_id == user.id)
+            .where(VoiceSession.duration_seconds.isnot(None))
+        ).scalar()
+
+        total_seconds = result or 0
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+
+        # Also add currently open session time
+        open_session = db.execute(
+            select(VoiceSession)
+            .where(VoiceSession.user_discord_id == user.id)
+            .where(VoiceSession.left_at.is_(None))
+        ).scalar_one_or_none()
+
+        if open_session:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            open_seconds = int((now - open_session.joined_at).total_seconds())
+            total_seconds += open_seconds
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+
+        await interaction.response.send_message(
+            f'**{user.display_name}** провёл в голосовых каналах: **{hours}ч {minutes}м**',
+            ephemeral=True
+        )
+    finally:
+        db.close()
+
+
 bot.run(TOKEN)
