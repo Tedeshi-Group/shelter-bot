@@ -24,3 +24,8 @@ jobs:
 
       - name: Check syntax
         run: python -m py_compile bot.py && python -m py_compile config.py && python -m py_compile database.py && python -m py_compile cogs/voice_channels.py
+
+      - name: Check alembic migrations
+        run: |
+          pip install -r requirements.txt
+          alembic check
