@@ -22,6 +22,24 @@ class VoiceChannels(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         await self._ensure_new_voice_exists()
+        self._restore_deletion_timers()
+
+    def _restore_deletion_timers(self):
+        guild = self.bot.guilds[0] if self.bot.guilds else None
+        if not guild:
+            return
+
+        try:
+            category = guild.get_channel(VOICE_CATEGORY_ID)
+        except (discord.NotFound, discord.HTTPException):
+            return
+
+        if not category:
+            return
+
+        for channel in category.voice_channels:
+            if channel.name.startswith(VOICE_CHANNEL_PREFIX) and not channel.members:
+                self._start_deletion_timer(channel)
 
     async def _ensure_new_voice_exists(self):
         guild = self.bot.guilds[0] if self.bot.guilds else None
