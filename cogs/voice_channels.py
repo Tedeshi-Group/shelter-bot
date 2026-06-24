@@ -1,64 +1,17 @@
 import asyncio
-import re
+from datetime import datetime
 
 import discord
 from discord.ext import commands
 
+from database import SessionLocal
+from models.voice_counter import VoiceCounter
+
 VOICE_CATEGORY_ID = 1517577490368041200
-ARCHIVE_CHANNEL_ID = 1517446069192102003
+ARCHIVE_CHANNEL_ID = 1429769594037600267
 VOICE_CHANNEL_PREFIX = "Голосовой #"
 NEW_VOICE_NAME = "Новый войс"
 EMPTY_TIMEOUT_SECONDS = 10
-
-REGION_OPTIONS = [
-    discord.SelectOption(label="Brazil", value="brazil", emoji="🇧🇷"),
-    discord.SelectOption(label="Hong Kong", value="hongkong", emoji="🇭🇰"),
-    discord.SelectOption(label="India", value="india", emoji="🇮🇳"),
-    discord.SelectOption(label="Japan", value="japan", emoji="🇯🇵"),
-    discord.SelectOption(label="Rotterdam", value="rotterdam", emoji="🇳🇱"),
-    discord.SelectOption(label="Russia", value="russia", emoji="🇷🇺"),
-    discord.SelectOption(label="Singapore", value="singapore", emoji="🇸🇬"),
-    discord.SelectOption(label="South Africa", value="southafrica", emoji="🇿🇦"),
-    discord.SelectOption(label="South Korea", value="southkorea", emoji="🇰🇷"),
-    discord.SelectOption(label="Sydney", value="sydney", emoji="🇦🇺"),
-    discord.SelectOption(label="US Central", value="us-central", emoji="🇺🇸"),
-    discord.SelectOption(label="US East", value="us-east", emoji="🇺🇸"),
-    discord.SelectOption(label="US South", value="us-south", emoji="🇺🇸"),
-    discord.SelectOption(label="US West", value="us-west", emoji="🇺🇸"),
-]
-
-
-class RegionSelect(discord.ui.Select):
-    def __init__(self):
-        super().__init__(
-            placeholder="Выберите регион войса",
-            options=REGION_OPTIONS,
-            min_values=1,
-            max_values=1,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        channel = interaction.channel
-        if not isinstance(channel, discord.VoiceChannel):
-            await interaction.response.send_message("Это меню работает только в голосовых каналах.", ephemeral=True)
-            return
-
-        if interaction.user not in channel.members:
-            await interaction.response.send_message("Вы должны быть в этом войсе чтобы менять регион.", ephemeral=True)
-            return
-
-        region = self.values[0]
-        try:
-            await channel.edit(rtc_region=region)
-            await interaction.response.send_message(f"Регион изменён на **{region}**.", ephemeral=True)
-        except Exception:
-            await interaction.response.send_message("Не удалось изменить регион.", ephemeral=True)
-
-
-class RegionView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(RegionSelect())
 
 
 class VoiceChannels(commands.Cog):
@@ -101,15 +54,9 @@ class VoiceChannels(commands.Cog):
                 elif before.channel.id in self.active_timers:
                     self._cancel_deletion_timer(before.channel.id)
 
-                if after.channel is None or after.channel.id != before.channel.id:
-                    await self._log_event(before.channel, f"🚪 **{member.display_name}** вышел из войса")
-
         if after.channel and after.channel.category_id == VOICE_CATEGORY_ID:
             if after.channel.name == NEW_VOICE_NAME:
                 await self._handle_new_voice_join(after.channel)
-            elif after.channel.name.startswith(VOICE_CHANNEL_PREFIX):
-                if before.channel is None or before.channel.id != after.channel.id:
-                    await self._log_event(after.channel, f"🚪 **{member.display_name}** вошёл в войс")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -136,7 +83,7 @@ class VoiceChannels(commands.Cog):
         if channel.id not in self._voice_threads:
             thread = await archive_channel.create_thread(
                 name=channel.name,
-                type=discord.ChannelType.public_thread
+                type=discord.ChannelType.private_thread
             )
             self._voice_threads[channel.id] = thread.id
 
@@ -146,7 +93,7 @@ class VoiceChannels(commands.Cog):
         if not thread:
             thread = await archive_channel.create_thread(
                 name=channel.name,
-                type=discord.ChannelType.public_thread
+                type=discord.ChannelType.private_thread
             )
             self._voice_threads[channel.id] = thread.id
 
@@ -169,46 +116,23 @@ class VoiceChannels(commands.Cog):
         if not category:
             return
 
-        max_number = 0
-        for ch in category.voice_channels:
-            match = re.match(r"Голосовой #(\d+)", ch.name)
-            if match:
-                num = int(match.group(1))
-                if num > max_number:
-                    max_number = num
-
-        new_name = f"{VOICE_CHANNEL_PREFIX}{max_number + 1}"
+        now = datetime.utcnow()
+        session = SessionLocal()
+        try:
+            counter = session.query(VoiceCounter).filter_by(
+                month=now.month, year=now.year
+            ).first()
+            if not counter:
+                counter = VoiceCounter(month=now.month, year=now.year, count=0)
+                session.add(counter)
+            counter.count += 1
+            session.commit()
+            new_name = f"{VOICE_CHANNEL_PREFIX}{counter.count}"
+        finally:
+            session.close()
 
         await channel.edit(name=new_name, user_limit=None)
         await category.create_voice_channel(NEW_VOICE_NAME, user_limit=1)
-
-        embed = discord.Embed(
-            title="Выбор региона",
-            description="Используйте меню ниже чтобы изменить регион войса.",
-            color=discord.Color.green(),
-        )
-        await channel.send(embed=embed, view=RegionView())
-
-    async def _log_event(self, channel: discord.VoiceChannel, text: str):
-        if not hasattr(self, '_voice_threads'):
-            return
-
-        thread_id = self._voice_threads.get(channel.id)
-        if not thread_id:
-            return
-
-        archive_channel = self.bot.get_channel(ARCHIVE_CHANNEL_ID)
-        if not archive_channel:
-            return
-
-        thread = archive_channel.get_thread(thread_id)
-        if not thread:
-            return
-
-        try:
-            await thread.send(text)
-        except (discord.NotFound, discord.HTTPException):
-            pass
 
     def _start_deletion_timer(self, channel: discord.VoiceChannel):
         task = asyncio.create_task(self._delete_after_timeout(channel))
