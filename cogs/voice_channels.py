@@ -123,7 +123,7 @@ class VoiceChannels(commands.Cog):
 
         if after.channel and after.channel.category_id == VOICE_CATEGORY_ID:
             if after.channel.name == NEW_VOICE_NAME:
-                await self._handle_new_voice_join(after.channel)
+                await self._handle_new_voice_join(after.channel, member)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -178,7 +178,7 @@ class VoiceChannels(commands.Cog):
         except (discord.NotFound, discord.HTTPException):
             pass
 
-    async def _handle_new_voice_join(self, channel: discord.VoiceChannel):
+    async def _handle_new_voice_join(self, channel: discord.VoiceChannel, creator: discord.Member):
         category = channel.category
         if not category:
             return
@@ -200,6 +200,13 @@ class VoiceChannels(commands.Cog):
 
         await channel.edit(name=new_name, user_limit=None)
         await category.create_voice_channel(NEW_VOICE_NAME, user_limit=1)
+
+        overwrite = discord.PermissionOverwrite(
+            manage_channels=True,
+            move_members=True,
+            kick_members=True,
+        )
+        await channel.set_permissions(creator, overwrite=overwrite)
 
         embed = discord.Embed(
             description="Используйте меню ниже чтобы изменить регион войса.",
