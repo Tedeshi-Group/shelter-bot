@@ -46,9 +46,8 @@ class VoiceChannels(commands.Cog):
         if not guild:
             return
 
-        try:
-            category = await guild.fetch_channel(VOICE_CATEGORY_ID)
-        except (discord.NotFound, discord.HTTPException):
+        category = guild.get_channel(VOICE_CATEGORY_ID)
+        if not category:
             return
 
         for channel in category.voice_channels:
