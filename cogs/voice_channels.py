@@ -9,8 +9,8 @@ from models.voice_counter import VoiceCounter
 
 VOICE_CATEGORY_ID = 1517577490368041200
 ARCHIVE_CHANNEL_ID = 1429769594037600267
-VOICE_CHANNEL_PREFIX = "Голосовой #"
-NEW_VOICE_NAME = "Новый войс"
+VOICE_CHANNEL_PREFIX = "голосовой #"
+NEW_VOICE_NAME = "новый войс"
 EMPTY_TIMEOUT_SECONDS = 10
 
 
