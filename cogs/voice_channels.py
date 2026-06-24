@@ -13,6 +13,56 @@ VOICE_CHANNEL_PREFIX = "голосовой #"
 NEW_VOICE_NAME = "новый войс"
 EMPTY_TIMEOUT_SECONDS = 10
 
+REGION_OPTIONS = [
+    discord.SelectOption(label="Brazil", value="brazil", emoji="🇧🇷"),
+    discord.SelectOption(label="Hong Kong", value="hongkong", emoji="🇭🇰"),
+    discord.SelectOption(label="India", value="india", emoji="🇮🇳"),
+    discord.SelectOption(label="Japan", value="japan", emoji="🇯🇵"),
+    discord.SelectOption(label="Rotterdam", value="rotterdam", emoji="🇳🇱"),
+    discord.SelectOption(label="Russia", value="russia", emoji="🇷🇺"),
+    discord.SelectOption(label="Singapore", value="singapore", emoji="🇸🇬"),
+    discord.SelectOption(label="South Africa", value="southafrica", emoji="🇿🇦"),
+    discord.SelectOption(label="South Korea", value="southkorea", emoji="🇰🇷"),
+    discord.SelectOption(label="Sydney", value="sydney", emoji="🇦🇺"),
+    discord.SelectOption(label="US Central", value="us-central", emoji="🇺🇸"),
+    discord.SelectOption(label="US East", value="us-east", emoji="🇺🇸"),
+    discord.SelectOption(label="US South", value="us-south", emoji="🇺🇸"),
+    discord.SelectOption(label="US West", value="us-west", emoji="🇺🇸"),
+]
+
+
+class RegionSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Выберите регион войса",
+            options=REGION_OPTIONS,
+            min_values=1,
+            max_values=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = interaction.channel
+        if not isinstance(channel, discord.VoiceChannel):
+            await interaction.response.send_message("Это меню работает только в голосовых каналах.", ephemeral=True)
+            return
+
+        if interaction.user not in channel.members:
+            await interaction.response.send_message("Вы должны быть в этом войсе чтобы менять регион.", ephemeral=True)
+            return
+
+        region = self.values[0]
+        try:
+            await channel.edit(rtc_region=region)
+            await interaction.response.send_message(f"Регион изменён на **{region}**.", ephemeral=True)
+        except Exception:
+            await interaction.response.send_message("Не удалось изменить регион.", ephemeral=True)
+
+
+class RegionView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(RegionSelect())
+
 
 class VoiceChannels(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -150,6 +200,12 @@ class VoiceChannels(commands.Cog):
 
         await channel.edit(name=new_name, user_limit=None)
         await category.create_voice_channel(NEW_VOICE_NAME, user_limit=1)
+
+        embed = discord.Embed(
+            description="Используйте меню ниже чтобы изменить регион войса.",
+            color=discord.Color.green(),
+        )
+        await channel.send(embed=embed, view=RegionView())
 
     def _start_deletion_timer(self, channel: discord.VoiceChannel):
         task = asyncio.create_task(self._delete_after_timeout(channel))
