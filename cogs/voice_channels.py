@@ -64,10 +64,86 @@ class RegionView(discord.ui.View):
         self.add_item(RegionSelect())
 
 
+def _build_deaf_options(channel: discord.VoiceChannel, invoker: discord.Member) -> list[discord.SelectOption]:
+    options = [discord.SelectOption(label="ВСЕХ", value="__all__", emoji="🔇")]
+    for member in channel.members:
+        if member.bot:
+            continue
+        status = "🔇" if member.voice.deaf else "🔊"
+        options.append(discord.SelectOption(
+            label=member.display_name,
+            value=str(member.id),
+            emoji=status,
+        ))
+    return options
+
+
+class DeafSelect(discord.ui.Select):
+    def __init__(self, channel: discord.VoiceChannel, invoker: discord.Member, cog: "VoiceChannels"):
+        super().__init__(
+            placeholder="Кого отключить от звука?",
+            options=_build_deaf_options(channel, invoker),
+            min_values=1,
+            max_values=1,
+        )
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = interaction.channel
+        if not isinstance(channel, discord.VoiceChannel):
+            await interaction.response.send_message("Это меню работает только в голосовых каналах.", ephemeral=True)
+            return
+
+        if not (interaction.user.guild_permissions.manage_channels or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("У вас нет прав для управления звуком.", ephemeral=True)
+            return
+
+        target_id = self.values[0]
+        ch_id = channel.id
+
+        if ch_id not in self.cog.deaf_states:
+            self.cog.deaf_states[ch_id] = set()
+
+        if target_id == "__all__":
+            humans = [m for m in channel.members if not m.bot]
+            should_deaf = any(m.id not in self.cog.deaf_states[ch_id] for m in humans)
+            for member in humans:
+                await member.edit(deaf=should_deaf)
+                if should_deaf:
+                    self.cog.deaf_states[ch_id].add(member.id)
+                else:
+                    self.cog.deaf_states[ch_id].discard(member.id)
+            state = "отключён" if should_deaf else "включён"
+            await interaction.response.send_message(f"Звук **{state}** для всех участников.", ephemeral=True)
+        else:
+            member = channel.guild.get_member(int(target_id))
+            if not member:
+                await interaction.response.send_message("Участник не найден.", ephemeral=True)
+                return
+            is_deafned = member.id in self.cog.deaf_states[ch_id]
+            await member.edit(deaf=not is_deafned)
+            if not is_deafned:
+                self.cog.deaf_states[ch_id].add(member.id)
+            else:
+                self.cog.deaf_states[ch_id].discard(member.id)
+            state = "отключён" if not is_deafned else "включён"
+            await interaction.response.send_message(f"Звук **{state}** для **{member.display_name}**.", ephemeral=True)
+
+        self.options = _build_deaf_options(channel, interaction.user)
+        await interaction.message.edit(view=self.view)
+
+
+class DeafView(discord.ui.View):
+    def __init__(self, channel: discord.VoiceChannel, invoker: discord.Member, cog: "VoiceChannels"):
+        super().__init__(timeout=None)
+        self.add_item(DeafSelect(channel, invoker, cog))
+
+
 class VoiceChannels(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.active_timers: dict[int, asyncio.Task] = {}
+        self.deaf_states: dict[int, set[int]] = {}
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -123,6 +199,13 @@ class VoiceChannels(commands.Cog):
         if after.channel and after.channel.category_id == VOICE_CATEGORY_ID:
             if after.channel.name == NEW_VOICE_NAME:
                 await self._handle_new_voice_join(after.channel, member)
+
+            ch_id = after.channel.id
+            if ch_id in self.deaf_states and member.id in self.deaf_states[ch_id]:
+                try:
+                    await member.edit(deaf=True)
+                except (discord.HTTPException, discord.Forbidden):
+                    pass
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -213,6 +296,12 @@ class VoiceChannels(commands.Cog):
         )
         await channel.send(embed=embed, view=RegionView())
 
+        deaf_embed = discord.Embed(
+            description="Отключите звук участнику войса.",
+            color=discord.Color.orange(),
+        )
+        await channel.send(embed=deaf_embed, view=DeafView(channel, creator, self))
+
     def _start_deletion_timer(self, channel: discord.VoiceChannel):
         task = asyncio.create_task(self._delete_after_timeout(channel))
         self.active_timers[channel.id] = task
@@ -235,6 +324,7 @@ class VoiceChannels(commands.Cog):
             await channel.delete(reason="Voice channel empty for 10 seconds")
         except discord.NotFound:
             pass
+        self.deaf_states.pop(channel.id, None)
         self.active_timers.pop(channel.id, None)
 
 
