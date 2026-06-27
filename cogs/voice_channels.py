@@ -88,7 +88,7 @@ class VoiceChannels(commands.Cog):
             return
 
         for channel in category.voice_channels:
-            if channel.name.startswith(VOICE_CHANNEL_PREFIX) and not channel.members:
+            if channel.name != NEW_VOICE_NAME and not channel.members:
                 self._start_deletion_timer(channel)
 
     async def _ensure_new_voice_exists(self):
@@ -112,14 +112,13 @@ class VoiceChannels(commands.Cog):
             return
 
         if before.channel and before.channel.category_id == VOICE_CATEGORY_ID:
-            if before.channel.name == NEW_VOICE_NAME and not before.channel.members:
+            if before.channel.name == NEW_VOICE_NAME:
                 return
 
-            if before.channel.name.startswith(VOICE_CHANNEL_PREFIX):
-                if not before.channel.members:
-                    self._start_deletion_timer(before.channel)
-                elif before.channel.id in self.active_timers:
-                    self._cancel_deletion_timer(before.channel.id)
+            if not before.channel.members:
+                self._start_deletion_timer(before.channel)
+            elif before.channel.id in self.active_timers:
+                self._cancel_deletion_timer(before.channel.id)
 
         if after.channel and after.channel.category_id == VOICE_CATEGORY_ID:
             if after.channel.name == NEW_VOICE_NAME:
