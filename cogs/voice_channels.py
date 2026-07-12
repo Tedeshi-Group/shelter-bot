@@ -108,7 +108,7 @@ class DeafSelect(discord.ui.Select):
             humans = [m for m in channel.members if not m.bot]
             should_deaf = any(m.id not in self.cog.deaf_states[ch_id] for m in humans)
             for member in humans:
-                await self.cog.bot.http.edit_voice_state(ch_id, member.id, channel_id=ch_id, deaf=should_deaf)
+                await member.edit(deafen=should_deaf)
                 if should_deaf:
                     self.cog.deaf_states[ch_id].add(member.id)
                 else:
@@ -121,7 +121,7 @@ class DeafSelect(discord.ui.Select):
                 await interaction.response.send_message("Участник не найден.", ephemeral=True)
                 return
             is_deafned = member.id in self.cog.deaf_states[ch_id]
-            await self.cog.bot.http.edit_voice_state(ch_id, member.id, channel_id=ch_id, deaf=not is_deafned)
+            await member.edit(deafen=not is_deafned)
             if not is_deafned:
                 self.cog.deaf_states[ch_id].add(member.id)
             else:
@@ -203,7 +203,7 @@ class VoiceChannels(commands.Cog):
             ch_id = after.channel.id
             if ch_id in self.deaf_states and member.id in self.deaf_states[ch_id]:
                 try:
-                    await self.bot.http.edit_voice_state(member.guild.id, member.id, channel_id=ch_id, deaf=True)
+                    await member.edit(deafen=True)
                 except (discord.HTTPException, discord.Forbidden):
                     pass
 
