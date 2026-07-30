@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from sqlalchemy import func, select
 
 from database import AsyncSessionLocal
-from models import User, VoiceSession
+from models import User, VoiceSession, Achievement, AchievementLevel, UserAchievement
 
 load_dotenv()
 
@@ -260,6 +260,105 @@ async def monthly(interaction: discord.Interaction, month: str | None = None):
             lines.append(f'{i}. **{username}** — {hours}ч {minutes}м')
 
         await interaction.response.send_message('\n'.join(lines), ephemeral=True)
+
+
+@bot.tree.command(name='achievements', description='Показать достижения пользователя')
+@app_commands.describe(user='Пользователь (по умолчанию вы)')
+async def achievements(interaction: discord.Interaction, user: discord.Member = None):
+    if user is None:
+        user = interaction.user
+
+    async with AsyncSessionLocal() as db:
+        all_achievements = (await db.execute(
+            select(Achievement).order_by(Achievement.id)
+        )).scalars().all()
+
+        user_achievements = (await db.execute(
+            select(UserAchievement)
+            .where(UserAchievement.user_discord_id == user.id)
+        )).scalars().all()
+
+        ua_map = {ua.achievement_id: ua for ua in user_achievements}
+
+        lines = [f'**Достижения {user.display_name}:**\n']
+        for ach in all_achievements:
+            ua = ua_map.get(ach.id)
+            if ua:
+                level_name = next(
+                    (l.name for l in ach.levels if l.level == ua.level),
+                    f"Уровень {ua.level}"
+                )
+                lines.append(f'{ach.icon or "🏆"} **{level_name}** — {ach.description}')
+            else:
+                lines.append(f'{ach.icon or "🔒"} ~~{ach.display_name}~~ — не получено')
+
+        await interaction.response.send_message('\n'.join(lines), ephemeral=True)
+
+
+@bot.tree.command(name='setrole', description='Назначить роль для уровня достижения (только админы)')
+@app_commands.describe(
+    achievement='Название достижения',
+    level='Уровень достижения',
+    role='Роль для выдачи',
+)
+@app_commands.choices(achievement=[
+    app_commands.Choice(name='Вояка', value='voice_total'),
+    app_commands.Choice(name='Непрерывник', value='voice_longest_session'),
+    app_commands.Choice(name='Марафонец', value='voice_streak'),
+    app_commands.Choice(name='Болтун', value='messages_total'),
+    app_commands.Choice(name='Одинокий волк', value='voice_lone_wolf'),
+])
+async def setrole(interaction: discord.Interaction, achievement: str, level: int, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message('Только администраторы могут использовать эту команду.', ephemeral=True)
+        return
+
+    async with AsyncSessionLocal() as db:
+        ach = (await db.execute(
+            select(Achievement).where(Achievement.name == achievement)
+        )).scalar_one_or_none()
+
+        if not ach:
+            await interaction.response.send_message('Достижение не найдено.', ephemeral=True)
+            return
+
+        ach_level = (await db.execute(
+            select(AchievementLevel)
+            .where(AchievementLevel.achievement_id == ach.id)
+            .where(AchievementLevel.level == level)
+        )).scalar_one_or_none()
+
+        if not ach_level:
+            await interaction.response.send_message(f'Уровень {level} не найден для достижения "{ach.display_name}".', ephemeral=True)
+            return
+
+        ach_level.role_id = role.id
+        await db.commit()
+
+    # Retroactive role assignment
+    assigned = 0
+    async with AsyncSessionLocal() as db:
+        holders = (await db.execute(
+            select(UserAchievement.user_discord_id)
+            .where(UserAchievement.achievement_id == ach.id)
+            .where(UserAchievement.level >= level)
+        )).scalars().all()
+
+        guild = interaction.guild
+        for uid in holders:
+            member = guild.get_member(uid)
+            if member and role not in member.roles:
+                try:
+                    await member.add_roles(role, reason=f"Achievement: {ach_level.name}")
+                    assigned += 1
+                except (discord.HTTPException, discord.Forbidden):
+                    pass
+
+    await interaction.response.send_message(
+        f'Роль {role.mention} назначена для **{ach_level.name}**.\n'
+        f'Выдана {assigned} участникам, которые уже получили это достижение.',
+        ephemeral=True
+    )
 
 
 bot.run(TOKEN)
