@@ -3,12 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, String, DateTime
+from sqlalchemy import BigInteger, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
 
 if TYPE_CHECKING:
+    from models.message_counter import MessageCounter
+    from models.user_achievement import UserAchievement
     from models.voice_session import VoiceSession
 
 
@@ -20,5 +22,8 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
+    total_messages: Mapped[int] = mapped_column(Integer, default=0)
 
-    sessions: Mapped[list["VoiceSession"]] = relationship(back_populates="user")
+    sessions: Mapped[list[VoiceSession]] = relationship(back_populates="user")
+    messages: Mapped[list[MessageCounter]] = relationship(back_populates="user")
+    achievements: Mapped[list[UserAchievement]] = relationship(back_populates="user")

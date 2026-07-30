@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer
+from sqlalchemy import BigInteger, DateTime, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -12,16 +12,14 @@ if TYPE_CHECKING:
     from models.user import User
 
 
-class VoiceSession(Base):
-    __tablename__ = "voice_sessions"
+class MessageCounter(Base):
+    __tablename__ = "message_counters"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_discord_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.discord_id"))
     channel_id: Mapped[int] = mapped_column(BigInteger)
-    joined_at: Mapped[datetime] = mapped_column(
+    timestamp: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
-    left_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    user: Mapped[User] = relationship(back_populates="sessions")
+    user: Mapped[User] = relationship(back_populates="messages")

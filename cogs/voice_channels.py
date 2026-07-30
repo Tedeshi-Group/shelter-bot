@@ -5,8 +5,9 @@ import discord
 from discord.ext import commands
 from sqlalchemy import select, text
 
+from achievements import check_achievements
 from database import AsyncSessionLocal
-from models import User, VoiceSession
+from models import MessageCounter, User, VoiceSession
 
 VOICE_CATEGORY_ID = 1517577490368041200
 ARCHIVE_CHANNEL_ID = 1429769594037600267
@@ -223,6 +224,14 @@ class VoiceChannels(commands.Cog):
                     session.duration_seconds = int((now - session.joined_at).total_seconds())
                 await db.commit()
 
+                # Check voice achievements
+                await self._check_and_notify_achievements(member, [
+                    "voice_total",
+                    "voice_longest_session",
+                    "voice_streak",
+                    "voice_lone_wolf",
+                ])
+
             elif before.channel.id != after.channel.id:
                 # Moved between channels
                 old_sessions = (await db.execute(
@@ -241,6 +250,13 @@ class VoiceChannels(commands.Cog):
                     joined_at=now,
                 ))
                 await db.commit()
+
+                # Check voice achievements
+                await self._check_and_notify_achievements(member, [
+                    "voice_total",
+                    "voice_longest_session",
+                    "voice_lone_wolf",
+                ])
 
         # --- Temporary voice channel management ---
         if before.channel and before.channel.category_id == VOICE_CATEGORY_ID:
@@ -316,6 +332,27 @@ class VoiceChannels(commands.Cog):
         except (discord.NotFound, discord.HTTPException):
             pass
 
+        # Count message
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(
+                select(User).where(User.discord_id == message.author.id)
+            )).scalar_one_or_none()
+
+            if user is None:
+                user = User(discord_id=message.author.id, username=message.author.name)
+                db.add(user)
+                await db.commit()
+
+            db.add(MessageCounter(
+                user_discord_id=message.author.id,
+                channel_id=message.channel.id,
+            ))
+            user.total_messages += 1
+            await db.commit()
+
+        # Check message achievements
+        await self._check_and_notify_achievements(message.author, ["messages_total"])
+
     async def _handle_new_voice_join(self, channel: discord.VoiceChannel, creator: discord.Member):
         category = channel.category
         if not category:
@@ -360,6 +397,36 @@ class VoiceChannels(commands.Cog):
             color=discord.Color.orange(),
         )
         await channel.send(embed=deaf_embed, view=DeafView(channel, creator, self))
+
+    async def _check_and_notify_achievements(self, member: discord.Member, achievement_names: list[str]):
+        """Check achievements and notify user if any are unlocked."""
+        for name in achievement_names:
+            unlocked = await check_achievements(member.id, name)
+            for item in unlocked:
+                await self._notify_achievement(member, item["achievement"], item["level"])
+
+    async def _notify_achievement(self, member: discord.Member, achievement, level):
+        """Send DM notification and assign role if configured."""
+        try:
+            dm = await member.create_dm()
+            embed = discord.Embed(
+                title="🏆 Достижение получено!",
+                description=f"**{level.name}**\n{achievement.description}",
+                color=discord.Color.gold(),
+            )
+            if achievement.icon:
+                embed.set_thumbnail(url=achievement.icon)
+            await dm.send(embed=embed)
+        except (discord.HTTPException, discord.Forbidden):
+            pass
+
+        if level.role_id:
+            try:
+                role = member.guild.get_role(level.role_id)
+                if role and role not in member.roles:
+                    await member.add_roles(role, reason="Achievement unlocked")
+            except (discord.HTTPException, discord.Forbidden):
+                pass
 
     def _start_deletion_timer(self, channel: discord.VoiceChannel):
         task = asyncio.create_task(self._delete_after_timeout(channel))
