@@ -8,6 +8,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from database import AsyncSessionLocal
 from models import User, VoiceSession, Achievement, AchievementLevel, UserAchievement
@@ -270,7 +271,7 @@ async def achievements(interaction: discord.Interaction, user: discord.Member = 
 
     async with AsyncSessionLocal() as db:
         all_achievements = (await db.execute(
-            select(Achievement).order_by(Achievement.id)
+            select(Achievement).options(selectinload(Achievement.levels)).order_by(Achievement.id)
         )).scalars().all()
 
         user_achievements = (await db.execute(
