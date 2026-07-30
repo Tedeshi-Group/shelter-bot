@@ -1,7 +1,7 @@
 """Achievement checking and unlocking logic."""
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from database import AsyncSessionLocal
 from models import (
@@ -51,16 +51,19 @@ async def check_achievements(user_id: int, achievement_name: str) -> list[dict]:
             return unlocked
         
         if metric_value >= next_level.threshold:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             if current:
                 current.level = next_level.level
-                current.unlocked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                current.unlocked_at = now
             else:
-                current = UserAchievement(
-                    user_discord_id=user_id,
-                    achievement_id=achievement.id,
-                    level=next_level.level,
+                await db.execute(
+                    text(
+                        "INSERT INTO user_achievements (user_discord_id, achievement_id, level, unlocked_at) "
+                        "VALUES (:uid, :aid, :level, :now) "
+                        "ON CONFLICT (user_discord_id, achievement_id) DO UPDATE SET level=:level, unlocked_at=:now"
+                    ),
+                    {"uid": user_id, "aid": achievement.id, "level": next_level.level, "now": now},
                 )
-                db.add(current)
             
             await db.commit()
             
