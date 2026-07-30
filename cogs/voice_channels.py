@@ -1,11 +1,12 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
+from sqlalchemy import select, text
 
-from database import SessionLocal
-from models.voice_counter import VoiceCounter
+from database import AsyncSessionLocal
+from models import User, VoiceSession
 
 VOICE_CATEGORY_ID = 1517577490368041200
 ARCHIVE_CHANNEL_ID = 1429769594037600267
@@ -187,6 +188,61 @@ class VoiceChannels(commands.Cog):
         if member.bot:
             return
 
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # --- Voice session tracking ---
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(
+                select(User).where(User.discord_id == member.id)
+            )).scalar_one_or_none()
+
+            if user is None:
+                user = User(discord_id=member.id, username=member.name)
+                db.add(user)
+                await db.commit()
+
+            if before.channel is None and after.channel is not None:
+                # Joined a voice channel
+                db.add(VoiceSession(
+                    user_discord_id=member.id,
+                    channel_id=after.channel.id,
+                    joined_at=now,
+                ))
+                await db.commit()
+
+            elif before.channel is not None and after.channel is None:
+                # Left voice channels
+                open_sessions = (await db.execute(
+                    select(VoiceSession)
+                    .where(VoiceSession.user_discord_id == member.id)
+                    .where(VoiceSession.left_at.is_(None))
+                )).scalars().all()
+
+                for session in open_sessions:
+                    session.left_at = now
+                    session.duration_seconds = int((now - session.joined_at).total_seconds())
+                await db.commit()
+
+            elif before.channel.id != after.channel.id:
+                # Moved between channels
+                old_sessions = (await db.execute(
+                    select(VoiceSession)
+                    .where(VoiceSession.user_discord_id == member.id)
+                    .where(VoiceSession.left_at.is_(None))
+                )).scalars().all()
+
+                for old_session in old_sessions:
+                    old_session.left_at = now
+                    old_session.duration_seconds = int((now - old_session.joined_at).total_seconds())
+
+                db.add(VoiceSession(
+                    user_discord_id=member.id,
+                    channel_id=after.channel.id,
+                    joined_at=now,
+                ))
+                await db.commit()
+
+        # --- Temporary voice channel management ---
         if before.channel and before.channel.category_id == VOICE_CATEGORY_ID:
             if before.channel.name == NEW_VOICE_NAME:
                 return
@@ -265,20 +321,23 @@ class VoiceChannels(commands.Cog):
         if not category:
             return
 
-        now = datetime.utcnow()
-        session = SessionLocal()
-        try:
-            counter = session.query(VoiceCounter).filter_by(
-                month=now.month, year=now.year
-            ).first()
-            if not counter:
-                counter = VoiceCounter(month=now.month, year=now.year, count=0)
-                session.add(counter)
-            counter.count += 1
-            session.commit()
-            new_name = f"{VOICE_CHANNEL_PREFIX}{counter.count}"
-        finally:
-            session.close()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                text("UPDATE voice_counters SET count = count + 1 WHERE month = :month AND year = :year RETURNING count"),
+                {"month": now.month, "year": now.year},
+            )
+            row = result.fetchone()
+            if row:
+                new_count = row[0]
+            else:
+                await db.execute(
+                    text("INSERT INTO voice_counters (month, year, count) VALUES (:month, :year, 1)"),
+                    {"month": now.month, "year": now.year},
+                )
+                new_count = 1
+            await db.commit()
+            new_name = f"{VOICE_CHANNEL_PREFIX}{new_count}"
 
         await channel.edit(name=new_name, user_limit=None)
         await category.create_voice_channel(NEW_VOICE_NAME, user_limit=1)
@@ -326,7 +385,6 @@ class VoiceChannels(commands.Cog):
             pass
         self.deaf_states.pop(channel.id, None)
         self.active_timers.pop(channel.id, None)
-
 
 
 async def setup(bot: commands.Bot):

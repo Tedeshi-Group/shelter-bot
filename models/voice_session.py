@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING
 
 from sqlalchemy import BigInteger, ForeignKey, DateTime, Integer
@@ -19,7 +19,7 @@ class VoiceSession(Base):
     user_discord_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.discord_id"))
     channel_id: Mapped[int] = mapped_column(BigInteger)
     joined_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow
+        DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
     left_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

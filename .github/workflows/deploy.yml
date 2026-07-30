@@ -18,6 +18,7 @@ jobs:
             cd ${{ secrets.VPS_PATH }}
             git pull origin production
             source .venv/bin/activate
-            pip install -r requirements.txt
+            pip install --upgrade pip
+            pip install -r requirements.txt --no-cache-dir
             alembic upgrade head
             sudo systemctl restart shelter-bot
