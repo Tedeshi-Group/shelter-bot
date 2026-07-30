@@ -61,6 +61,63 @@ def upgrade() -> None:
     sa.UniqueConstraint('user_discord_id', 'achievement_id', name='uq_user_achievement')
     )
     op.add_column('users', sa.Column('total_messages', sa.Integer(), nullable=False))
+
+    # Seed achievement data
+    achievements_table = sa.table('achievements',
+        sa.column('id', sa.Integer),
+        sa.column('name', sa.String),
+        sa.column('display_name', sa.String),
+        sa.column('description', sa.String),
+        sa.column('icon', sa.String),
+        sa.column('max_level', sa.Integer),
+    )
+    levels_table = sa.table('achievement_levels',
+        sa.column('id', sa.Integer),
+        sa.column('achievement_id', sa.Integer),
+        sa.column('level', sa.Integer),
+        sa.column('threshold', sa.Integer),
+        sa.column('role_id', sa.BigInteger),
+        sa.column('name', sa.String),
+    )
+
+    op.bulk_insert(achievements_table, [
+        {'id': 1, 'name': 'voice_total', 'display_name': 'Вояка', 'description': 'Провести в голосовых каналах суммарно N часов', 'icon': '🎙️', 'max_level': 7},
+        {'id': 2, 'name': 'voice_longest_session', 'display_name': 'Непрерывник', 'description': 'Провести в голосовом канале непрерывно N часов', 'icon': '⏰', 'max_level': 4},
+        {'id': 3, 'name': 'voice_streak', 'display_name': 'Марафонец', 'description': 'Заходить в голосовые каналы N дней подряд', 'icon': '🔥', 'max_level': 4},
+        {'id': 4, 'name': 'messages_total', 'display_name': 'Болтун', 'description': 'Написать суммарно N сообщений', 'icon': '💬', 'max_level': 5},
+        {'id': 5, 'name': 'voice_lone_wolf', 'display_name': 'Одинокий волк', 'description': 'Находиться в голосовом канале одному N минут', 'icon': '🐺', 'max_level': 3},
+    ])
+
+    op.bulk_insert(levels_table, [
+        # Вояка
+        {'id': 1, 'achievement_id': 1, 'level': 1, 'threshold': 7200, 'role_id': None, 'name': 'Вояка I'},
+        {'id': 2, 'achievement_id': 1, 'level': 2, 'threshold': 14400, 'role_id': None, 'name': 'Вояка II'},
+        {'id': 3, 'achievement_id': 1, 'level': 3, 'threshold': 28800, 'role_id': None, 'name': 'Вояка III'},
+        {'id': 4, 'achievement_id': 1, 'level': 4, 'threshold': 57600, 'role_id': None, 'name': 'Вояка IV'},
+        {'id': 5, 'achievement_id': 1, 'level': 5, 'threshold': 115200, 'role_id': None, 'name': 'Вояка V'},
+        {'id': 6, 'achievement_id': 1, 'level': 6, 'threshold': 230400, 'role_id': None, 'name': 'Вояка VI'},
+        {'id': 7, 'achievement_id': 1, 'level': 7, 'threshold': 460800, 'role_id': None, 'name': 'Вояка VII'},
+        # Непрерывник
+        {'id': 8, 'achievement_id': 2, 'level': 1, 'threshold': 3600, 'role_id': None, 'name': 'Непрерывник I'},
+        {'id': 9, 'achievement_id': 2, 'level': 2, 'threshold': 7200, 'role_id': None, 'name': 'Непрерывник II'},
+        {'id': 10, 'achievement_id': 2, 'level': 3, 'threshold': 10800, 'role_id': None, 'name': 'Непрерывник III'},
+        {'id': 11, 'achievement_id': 2, 'level': 4, 'threshold': 18000, 'role_id': None, 'name': 'Непрерывник IV'},
+        # Марафонец
+        {'id': 12, 'achievement_id': 3, 'level': 1, 'threshold': 3, 'role_id': None, 'name': 'Марафонец I'},
+        {'id': 13, 'achievement_id': 3, 'level': 2, 'threshold': 7, 'role_id': None, 'name': 'Марафонец II'},
+        {'id': 14, 'achievement_id': 3, 'level': 3, 'threshold': 14, 'role_id': None, 'name': 'Марафонец III'},
+        {'id': 15, 'achievement_id': 3, 'level': 4, 'threshold': 30, 'role_id': None, 'name': 'Марафонец IV'},
+        # Болтун
+        {'id': 16, 'achievement_id': 4, 'level': 1, 'threshold': 100, 'role_id': None, 'name': 'Болтун I'},
+        {'id': 17, 'achievement_id': 4, 'level': 2, 'threshold': 500, 'role_id': None, 'name': 'Болтун II'},
+        {'id': 18, 'achievement_id': 4, 'level': 3, 'threshold': 1000, 'role_id': None, 'name': 'Болтун III'},
+        {'id': 19, 'achievement_id': 4, 'level': 4, 'threshold': 5000, 'role_id': None, 'name': 'Болтун IV'},
+        {'id': 20, 'achievement_id': 4, 'level': 5, 'threshold': 10000, 'role_id': None, 'name': 'Болтун V'},
+        # Одинокий волк
+        {'id': 21, 'achievement_id': 5, 'level': 1, 'threshold': 1800, 'role_id': None, 'name': 'Одинокий волк I'},
+        {'id': 22, 'achievement_id': 5, 'level': 2, 'threshold': 3600, 'role_id': None, 'name': 'Одинокий волк II'},
+        {'id': 23, 'achievement_id': 5, 'level': 3, 'threshold': 7200, 'role_id': None, 'name': 'Одинокий волк III'},
+    ])
     # ### end Alembic commands ###
 
 
