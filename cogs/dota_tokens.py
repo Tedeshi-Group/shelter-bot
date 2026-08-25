@@ -129,7 +129,14 @@ class TokenRequestView(discord.ui.View):
             embed = self._build_request_embed(request, tokens, interaction.user, "open")
             view = RequestView(request.id)
 
-            msg = await interaction.channel.send(embed=embed, view=view)
+            # Create public thread for the request
+            thread = await interaction.channel.create_thread(
+                name=f"Запрос #{request.id} — {', '.join(t.name for t in tokens[:3])}",
+                auto_archive_duration=1440,
+                type=discord.ChannelType.public_thread,
+            )
+
+            msg = await thread.send(embed=embed, view=view)
 
             # Update request with message_id
             async with AsyncSessionLocal() as db2:
@@ -141,7 +148,7 @@ class TokenRequestView(discord.ui.View):
             self.selected_tokens.pop(user_id, None)
 
             await interaction.response.send_message(
-                f"Запрос #{request.id} создан!",
+                f"Запрос #{request.id} создан! Тред: {thread.mention}",
                 ephemeral=True,
             )
 
@@ -159,6 +166,7 @@ class TokenRequestView(discord.ui.View):
             "confirmed": discord.Color.green(),
             "disputed": discord.Color.red(),
             "rejected": discord.Color.dark_red(),
+            "closed": discord.Color.dark_grey(),
         }
         status_labels = {
             "open": "Открыт",
@@ -166,6 +174,7 @@ class TokenRequestView(discord.ui.View):
             "confirmed": "Выполнен",
             "disputed": "Спор",
             "rejected": "Отклонён",
+            "closed": "Закрыт",
         }
 
         embed = discord.Embed(
@@ -190,6 +199,7 @@ class RequestView(discord.ui.View):
     def __init__(self, request_id: int):
         super().__init__(timeout=None)
         self.request_id = request_id
+        self.add_item(CloseButton(request_id))
 
     @discord.ui.button(label="Выполнить", style=discord.ButtonStyle.success, custom_id="token_fulfill")
     async def fulfill_request(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -231,10 +241,11 @@ class RequestView(discord.ui.View):
         # Update embed
         await self._update_embed(interaction, "in_progress", interaction.user)
 
-        # Replace buttons
+        # Replace buttons: Confirm, Dispute, Close
         self.clear_items()
         self.add_item(ConfirmButton(self.request_id))
         self.add_item(DisputeButton(self.request_id))
+        self.add_item(CloseButton(self.request_id))
         await interaction.message.edit(view=self)
 
         await interaction.response.send_message(
@@ -378,6 +389,60 @@ class DisputeButton(discord.ui.Button):
         await self._update_embed(interaction, "disputed")
         await interaction.message.edit(view=None)
         await interaction.response.send_message("Спор создан. Администратор рассмотрит его.", ephemeral=True)
+
+    async def _update_embed(self, interaction: discord.Interaction, status: str):
+        async with AsyncSessionLocal() as db:
+            request = (await db.execute(
+                select(TokenRequest)
+                .options(selectinload(TokenRequest.tokens))
+                .where(TokenRequest.id == self.request_id)
+            )).scalar_one_or_none()
+            if not request:
+                return
+
+            tokens = (await db.execute(
+                select(DotaToken).where(DotaToken.id.in_([t.token_id for t in request.tokens]))
+            )).scalars().all()
+
+        requester = interaction.guild.get_member(request.requester_id) or await interaction.guild.fetch_member(request.requester_id)
+        embed = TokenRequestView._build_request_embed(request, tokens, requester, status)
+        await interaction.message.edit(embed=embed)
+
+
+class CloseButton(discord.ui.Button):
+    def __init__(self, request_id: int):
+        super().__init__(label="Закрыть", style=discord.ButtonStyle.secondary, custom_id=f"token_close_{request_id}")
+        self.request_id = request_id
+
+    async def callback(self, interaction: discord.Interaction):
+        async with AsyncSessionLocal() as db:
+            request = (await db.execute(
+                select(TokenRequest).where(TokenRequest.id == self.request_id)
+            )).scalar_one_or_none()
+
+            if not request:
+                await interaction.response.send_message("Запрос не найден.", ephemeral=True)
+                return
+
+            if request.requester_id != interaction.user.id:
+                await interaction.response.send_message("Только автор запроса может закрыть его.", ephemeral=True)
+                return
+
+            if request.status not in ("open", "in_progress"):
+                await interaction.response.send_message("Этот запрос уже завершён.", ephemeral=True)
+                return
+
+            request.status = "closed"
+            await db.commit()
+
+        # Update embed
+        await self._update_embed(interaction, "closed")
+        await interaction.message.edit(view=None)
+        await interaction.response.send_message("Запрос закрыт.", ephemeral=True)
+
+        # Archive thread
+        if interaction.message.thread:
+            await interaction.message.thread.edit(archived=True, locked=True)
 
     async def _update_embed(self, interaction: discord.Interaction, status: str):
         async with AsyncSessionLocal() as db:
