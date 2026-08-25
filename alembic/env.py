@@ -15,7 +15,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 from database import Base
-from models import User, VoiceSession, VoiceCounter, MessageCounter, Achievement, AchievementLevel, UserAchievement  # noqa: F401
+from models import User, VoiceSession, MessageCounter, Achievement, AchievementLevel, UserAchievement, DotaToken, TokenRequest, TokenRequestItem, TokenFulfillment  # noqa: F401
 
 target_metadata = Base.metadata
 

@@ -1,7 +1,7 @@
 import logging
 import os
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -21,6 +21,7 @@ GUILD_ID = int(os.getenv('GUILD_ID', '1307622842048839731'))
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
+intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
@@ -73,6 +74,16 @@ async def on_ready():
             await voice_cog._ensure_new_voice_exists()
     except Exception:
         logging.error("Ошибка загрузки кога voice_channels:\n%s", traceback.format_exc())
+
+    try:
+        await bot.load_extension("cogs.moderation")
+    except Exception:
+        logging.error("Ошибка загрузки кога moderation:\n%s", traceback.format_exc())
+
+    try:
+        await bot.load_extension("cogs.dota_tokens")
+    except Exception:
+        logging.error("Ошибка загрузки кога dota_tokens:\n%s", traceback.format_exc())
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     async with AsyncSessionLocal() as db:
@@ -136,68 +147,6 @@ async def stats(interaction: discord.Interaction):
 
         await interaction.response.send_message('\n'.join(lines))
 
-
-@bot.tree.command(name='time', description='Показать время пользователя в голосовых каналах')
-@app_commands.describe(
-    user='Пользователь (по умолчанию вы)',
-    period='Период: day, week, month или all (по умолчанию all)'
-)
-@app_commands.choices(period=[
-    app_commands.Choice(name='За день', value='day'),
-    app_commands.Choice(name='За неделю', value='week'),
-    app_commands.Choice(name='За месяц', value='month'),
-    app_commands.Choice(name='Всё время', value='all'),
-])
-async def time(interaction: discord.Interaction, user: discord.Member = None, period: str = 'all'):
-    if user is None:
-        user = interaction.user
-
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    
-    if period == 'day':
-        cutoff = now - timedelta(days=1)
-        period_text = 'за последний день'
-    elif period == 'week':
-        cutoff = now - timedelta(weeks=1)
-        period_text = 'за последнюю неделю'
-    elif period == 'month':
-        cutoff = now - timedelta(days=30)
-        period_text = 'за последний месяц'
-    else:
-        cutoff = None
-        period_text = 'за всё время'
-
-    async with AsyncSessionLocal() as db:
-        query = select(
-            func.coalesce(func.sum(VoiceSession.duration_seconds), 0).label('total_seconds'),
-        ).where(VoiceSession.user_discord_id == user.id)
-        
-        if cutoff:
-            query = query.where(VoiceSession.joined_at >= cutoff)
-        
-        query = query.where(VoiceSession.duration_seconds.isnot(None))
-        
-        result = (await db.execute(query)).scalar()
-        total_seconds = result or 0
-
-        if period == 'all':
-            open_session = (await db.execute(
-                select(VoiceSession)
-                .where(VoiceSession.user_discord_id == user.id)
-                .where(VoiceSession.left_at.is_(None))
-            )).scalar_one_or_none()
-
-            if open_session:
-                open_seconds = int((now - open_session.joined_at).total_seconds())
-                total_seconds += open_seconds
-
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-
-        await interaction.response.send_message(
-            f'**{user.display_name}** провёл в голосовых каналах {period_text}: **{hours}ч {minutes}м**',
-            ephemeral=True
-        )
 
 
 @bot.tree.command(name='monthly', description='Показать статистику за месяц')
