@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -16,6 +17,8 @@ from models import (
     UserAchievement,
     VoiceSession,
 )
+
+log = logging.getLogger(__name__)
 
 TOKEN_CHANNEL_ID = 1541914614588121109
 MAX_ACTIVE_REQUESTS = 3
@@ -367,9 +370,11 @@ class DotaTokens(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._view_registered = False
+        log.info("DotaTokens cog initialized")
 
     @commands.Cog.listener()
     async def on_ready(self):
+        log.info("DotaTokens on_ready fired")
         if not self._view_registered:
             await self._setup_persistent_view()
             self._view_registered = True
@@ -377,6 +382,7 @@ class DotaTokens(commands.Cog):
 
     async def _setup_persistent_view(self):
         """Register persistent view and send it to the token channel if needed."""
+        log.info("Setting up persistent view for channel %s", TOKEN_CHANNEL_ID)
         view = TokenRequestView()
         self.bot.add_view(view)
 
@@ -399,11 +405,15 @@ class DotaTokens(commands.Cog):
         # Check if persistent view message exists in channel
         channel = self.bot.get_channel(TOKEN_CHANNEL_ID)
         if not channel:
+            log.warning("Channel %s not found!", TOKEN_CHANNEL_ID)
             return
+
+        log.info("Found channel: %s (%s)", channel.name, channel.id)
 
         # Try to find existing view message
         async for message in channel.history(limit=10):
             if message.author == self.bot.user and message.components:
+                log.info("Persistent view message already exists")
                 return  # View already exists
 
         # Send new persistent view
@@ -413,6 +423,7 @@ class DotaTokens(commands.Cog):
             color=discord.Color.blue(),
         )
         await channel.send(embed=embed, view=view)
+        log.info("Persistent view message sent to channel")
 
     # --- Token management commands ---
 
@@ -610,6 +621,7 @@ class DotaTokens(commands.Cog):
 
     @tasks.loop(minutes=5)
     async def auto_confirm_loop(self):
+        log.debug("Auto-confirm loop running")
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         async with AsyncSessionLocal() as db:
             expired = (await db.execute(
@@ -655,6 +667,7 @@ class DotaTokens(commands.Cog):
     @auto_confirm_loop.before_loop
     async def before_auto_confirm(self):
         await self.bot.wait_until_ready()
+        log.info("Auto-confirm loop starting")
 
     async def _refresh_select_menu(self):
         """Refresh the select menu options in the persistent view."""
