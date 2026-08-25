@@ -17,9 +17,10 @@ class TokenRequest(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     requester_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.discord_id"))
-    status: Mapped[str] = mapped_column(String(20), default="open")  # open, in_progress, confirmed, disputed, rejected
+    status: Mapped[str] = mapped_column(String(20), default="open")  # open, in_progress, confirmed, disputed, rejected, closed
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    creation_bonus: Mapped[bool] = mapped_column(default=False)  # eligible for creation bonus
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
@@ -36,6 +37,9 @@ class TokenRequestItem(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     request_id: Mapped[int] = mapped_column(Integer, ForeignKey("token_requests.id"))
     token_id: Mapped[int] = mapped_column(Integer, ForeignKey("dota_tokens.id"))
+    fulfilled: Mapped[bool] = mapped_column(default=False)
+    fulfilled_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     request: Mapped[TokenRequest] = relationship(back_populates="tokens")
 
