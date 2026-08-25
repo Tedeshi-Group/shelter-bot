@@ -26,6 +26,13 @@ MAX_TOKENS_PER_REQUEST = 5
 AUTO_CONFIRM_HOURS = 24
 
 
+def _parse_emoji(emoji_str: str) -> discord.PartialEmoji | str:
+    """Parse emoji string - returns PartialEmoji for custom, str for Unicode."""
+    if emoji_str.startswith('<'):
+        return discord.PartialEmoji.from_str(emoji_str)
+    return emoji_str
+
+
 # --- Persistent Views ---
 
 class TokenRequestView(discord.ui.View):
@@ -37,7 +44,7 @@ class TokenRequestView(discord.ui.View):
 
         if tokens:
             options = [
-                discord.SelectOption(label=t.name, value=str(t.id), emoji=t.emoji)
+                discord.SelectOption(label=t.name, value=str(t.id), emoji=_parse_emoji(t.emoji))
                 for t in tokens
             ][:25]  # Discord max 25 options
             select = discord.ui.Select(
@@ -447,16 +454,19 @@ class DotaTokens(commands.Cog):
     # --- Token management commands ---
 
     @app_commands.command(name="token-add", description="Добавить жетон (только админы)")
-    @app_commands.describe(name="Название жетона", emoji="Эмодзи жетона (юникод)")
+    @app_commands.describe(name="Название жетона", emoji="Эмодзи жетона (юникод или кастомный)")
     async def token_add(self, interaction: discord.Interaction, name: str, emoji: str):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("Только администраторы могут использовать эту команду.", ephemeral=True)
             return
 
-        # Validate emoji: must be short and contain non-alphanumeric chars
-        if len(emoji) > 10 or emoji.isalnum():
+        # Validate emoji: Unicode emoji or custom Discord emoji <:name:id> / <a:name:id>
+        import re
+        is_unicode = len(emoji) <= 10 and not emoji.isalnum()
+        is_custom = bool(re.match(r'^<a?:\w+:\d+>$', emoji))
+        if not is_unicode and not is_custom:
             await interaction.response.send_message(
-                "Укажите корректный эмодзи (юникод). Пример: 🎯, ⚔️, 🛡️",
+                "Укажите корректный эмодзи. Пример: 🎯, ⚔️, или кастомный `<:name:id>`",
                 ephemeral=True,
             )
             return
