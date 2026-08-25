@@ -24,6 +24,9 @@ class User(Base):
     )
     total_messages: Mapped[int] = mapped_column(Integer, default=0)
     friendship_points: Mapped[int] = mapped_column(Integer, default=0)
+    steam_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    steam_nickname: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    steam_avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     sessions: Mapped[list[VoiceSession]] = relationship(back_populates="user")
     messages: Mapped[list[MessageCounter]] = relationship(back_populates="user")

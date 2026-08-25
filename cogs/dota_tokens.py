@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -34,7 +36,81 @@ def _parse_emoji(emoji_str: str) -> discord.PartialEmoji | str:
     return emoji_str
 
 
+async def _parse_steam_profile(url: str) -> dict | None:
+    """Parse Steam profile page to extract nickname and avatar URL.
+
+    Returns dict with 'nickname' and 'avatar_url' keys, or None on failure.
+    """
+    # Normalize URL
+    if not url.startswith('http'):
+        url = 'https://' + url
+
+    # Validate Steam URL pattern
+    if not re.match(r'https?://steamcommunity\.com/(id|profiles)/[\w]+', url):
+        return None
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+
+        # Extract nickname from <title> or <span class="actual_persona_name">
+        nickname_match = re.search(r'<title>Steam Community :: (.+?)</title>', html)
+        if not nickname_match:
+            nickname_match = re.search(r'class="actual_persona_name">(.+?)<', html)
+        nickname = nickname_match.group(1).strip() if nickname_match else None
+
+        # Extract avatar from <img src="...avatar...">
+        avatar_match = re.search(r'<link rel="image_src" href="(.+?)"', html)
+        if not avatar_match:
+            avatar_match = re.search(r'<img[^>]+class="playerAvatar[^"]*"[^>]+src="(.+?)"', html)
+        avatar_url = avatar_match.group(1) if avatar_match else None
+
+        if not nickname and not avatar_url:
+            return None
+
+        return {
+            'nickname': nickname,
+            'avatar_url': avatar_url,
+        }
+    except Exception as e:
+        log.warning("Failed to parse Steam profile %s: %s", url, e)
+        return None
+
+
 # --- Persistent Views ---
+
+class SteamUrlModal(discord.ui.Modal, title="Steam профиль"):
+    """Modal for entering Steam profile URL."""
+
+    steam_url = discord.ui.TextInput(
+        label="Ссылка на Steam профиль",
+        placeholder="https://steamcommunity.com/id/yourname",
+        style=discord.TextStyle.short,
+        required=True,
+    )
+
+    def __init__(self, callback_after):
+        super().__init__()
+        self.callback_after = callback_after
+
+    async def on_submit(self, interaction: discord.Interaction):
+        url = self.steam_url.value.strip()
+        if not url.startswith('http'):
+            url = 'https://' + url
+
+        if not re.match(r'https?://steamcommunity\.com/(id|profiles)/[\w]+', url):
+            await interaction.response.send_message(
+                "Некорректная ссылка. Пример: https://steamcommunity.com/id/yourname",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await self.callback_after(interaction, url)
+
 
 class TokenRequestView(discord.ui.View):
     """Persistent view in the token channel with select menu + create button."""
@@ -84,6 +160,31 @@ class TokenRequestView(discord.ui.View):
             )
             return
 
+        # Check if user has Steam info
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(
+                select(User).where(User.discord_id == user_id)
+            )).scalar_one_or_none()
+
+        if not user or not user.steam_url:
+            # Show modal to enter Steam URL
+            async def on_steam_submit(inter: discord.Interaction, steam_url: str):
+                await self._process_steam_and_create(inter, user_id, selected, steam_url)
+
+            modal = SteamUrlModal(on_steam_submit)
+            await interaction.response.send_modal(modal)
+            return
+
+        # User has Steam info, proceed with creation
+        await self._do_create_request(interaction, user_id, selected)
+
+    async def _process_steam_and_create(
+        self, interaction: discord.Interaction, user_id: int, selected: list[int], steam_url: str
+    ):
+        """Parse Steam profile and create request."""
+        # Parse Steam profile
+        steam_info = await _parse_steam_profile(steam_url)
+
         async with AsyncSessionLocal() as db:
             user = (await db.execute(
                 select(User).where(User.discord_id == user_id)
@@ -91,7 +192,38 @@ class TokenRequestView(discord.ui.View):
             if user is None:
                 user = User(discord_id=user_id, username=interaction.user.name)
                 db.add(user)
-                await db.flush()
+
+            user.steam_url = steam_url
+            if steam_info:
+                user.steam_nickname = steam_info.get('nickname')
+                user.steam_avatar_url = steam_info.get('avatar_url')
+            await db.commit()
+
+        if steam_info:
+            await interaction.followup.send(
+                f"Steam профиль сохранён! Ник: **{steam_info.get('nickname', 'неизвестно')}**",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "Не удалось распарсить Steam профиль, но ссылка сохранена.",
+                ephemeral=True,
+            )
+
+        # Create the request
+        await self._do_create_request(interaction, user_id, selected)
+
+    async def _do_create_request(
+        self, interaction: discord.Interaction, user_id: int, selected: list[int]
+    ):
+        """Actually create the token request."""
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(
+                select(User).where(User.discord_id == user_id)
+            )).scalar_one_or_none()
+            if user is None:
+                await interaction.followup.send("Пользователь не найден.", ephemeral=True)
+                return
 
             active_count = (await db.execute(
                 select(func.count(TokenRequest.id))
@@ -99,7 +231,7 @@ class TokenRequestView(discord.ui.View):
                 .where(TokenRequest.status.in_(["open", "in_progress"]))
             )).scalar()
             if active_count >= MAX_ACTIVE_REQUESTS:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"У вас уже {active_count} активных запросов (максимум {MAX_ACTIVE_REQUESTS}).",
                     ephemeral=True,
                 )
@@ -109,7 +241,7 @@ class TokenRequestView(discord.ui.View):
                 select(DotaToken).where(DotaToken.id.in_(selected))
             )).scalars().all()
             if not tokens:
-                await interaction.response.send_message("Жетоны не найдены.", ephemeral=True)
+                await interaction.followup.send("Жетоны не найдены.", ephemeral=True)
                 return
 
             now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -137,11 +269,15 @@ class TokenRequestView(discord.ui.View):
 
             await db.commit()
 
+            # Reload user for steam fields
+            await db.refresh(user)
+
         # Build embed with Select menu for fulfillers
-        embed = self._build_request_embed(request, tokens, interaction.user, "open")
+        embed = self._build_request_embed(request, tokens, interaction.user, "open", user)
         view = RequestView(request.id, tokens)
 
-        msg = await interaction.channel.send(embed=embed, view=view)
+        channel = interaction.channel
+        msg = await channel.send(embed=embed, view=view)
 
         async with AsyncSessionLocal() as db2:
             req = await db2.get(TokenRequest, request.id)
@@ -150,7 +286,7 @@ class TokenRequestView(discord.ui.View):
 
         self.selected_tokens.pop(user_id, None)
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Запрос #{request.id} создан!",
             ephemeral=True,
         )
@@ -161,6 +297,7 @@ class TokenRequestView(discord.ui.View):
         tokens: list[DotaToken],
         requester: discord.User | discord.Member,
         status: str,
+        db_user: User | None = None,
     ) -> discord.Embed:
         colors = {
             "open": discord.Color.blue(),
@@ -184,6 +321,12 @@ class TokenRequestView(discord.ui.View):
             color=colors.get(status, discord.Color.blue()),
         )
         embed.set_author(name=requester.display_name, icon_url=requester.display_avatar.url)
+
+        # Steam info
+        if db_user and db_user.steam_nickname:
+            embed.add_field(name="Steam", value=db_user.steam_nickname, inline=True)
+        if db_user and db_user.steam_avatar_url:
+            embed.set_thumbnail(url=db_user.steam_avatar_url)
 
         token_lines = [f"{t.emoji} {t.name}" for t in tokens]
         embed.add_field(name="Нужные жетоны", value="\n".join(token_lines), inline=False)
@@ -300,14 +443,16 @@ class RequestView(discord.ui.View):
             # Update main embed with remaining tokens
             remaining = [t for t in request.tokens if not t.fulfilled]
             remaining_tokens = []
+            db_user = None
             async with AsyncSessionLocal() as db:
                 for item in remaining:
                     t = await db.get(DotaToken, item.token_id)
                     if t:
                         remaining_tokens.append(t)
+                db_user = await db.get(User, request.requester_id)
 
             requester = interaction.guild.get_member(request.requester_id)
-            embed = TokenRequestView._build_request_embed(request, remaining_tokens, requester, "in_progress")
+            embed = TokenRequestView._build_request_embed(request, remaining_tokens, requester, "in_progress", db_user)
             new_view = RequestView(self.request_id, remaining_tokens)
             await interaction.message.edit(embed=embed, view=new_view)
 
@@ -319,7 +464,7 @@ class RequestView(discord.ui.View):
     async def _get_or_create_thread(
         self, interaction: discord.Interaction, request: TokenRequest
     ) -> discord.Thread:
-        """Get existing private thread or create new one."""
+        """Get existing private thread or create new one (only for requester)."""
         if request.thread_id:
             thread = interaction.guild.get_thread(request.thread_id)
             if thread:
@@ -332,13 +477,10 @@ class RequestView(discord.ui.View):
             type=discord.ChannelType.private_thread,
         )
 
-        # Add requester
+        # Add only requester
         requester_member = interaction.guild.get_member(request.requester_id)
         if requester_member:
             await thread.add_user(requester_member)
-
-        # Add fulfiller
-        await thread.add_user(interaction.user)
 
         # Save thread_id
         async with AsyncSessionLocal() as db:
@@ -411,7 +553,9 @@ class TokenConfirmView(discord.ui.View):
     async def dispute_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with AsyncSessionLocal() as db:
             request = (await db.execute(
-                select(TokenRequest).where(TokenRequest.id == self.request_id)
+                select(TokenRequest)
+                .options(selectinload(TokenRequest.tokens))
+                .where(TokenRequest.id == self.request_id)
             )).scalar_one_or_none()
 
             if not request:
@@ -422,12 +566,47 @@ class TokenConfirmView(discord.ui.View):
                 await interaction.response.send_message("Только автор запроса может создать спор.", ephemeral=True)
                 return
 
+            # Find the fulfiller for this specific token
+            fulfiller_id = None
+            for t in request.tokens:
+                if t.token_id == self.token_id:
+                    fulfiller_id = t.fulfilled_by
+                    break
+
             request.status = "disputed"
             await db.commit()
 
+        # Create dispute thread (accessible to both parties)
+        thread = await interaction.channel.create_thread(
+            name=f"Спор #{self.request_id}",
+            auto_archive_duration=1440,
+            type=discord.ChannelType.private_thread,
+        )
+
+        # Add requester
+        requester_member = interaction.guild.get_member(request.requester_id)
+        if requester_member:
+            await thread.add_user(requester_member)
+
+        # Add fulfiller
+        if fulfiller_id:
+            fulfiller_member = interaction.guild.get_member(fulfiller_id)
+            if fulfiller_member:
+                try:
+                    await thread.add_user(fulfiller_member)
+                except discord.HTTPException:
+                    pass
+
+        await thread.send(
+            f"Спор по запросу #{self.request_id}.\n"
+            f"Заказчик: <@{request.requester_id}>\n"
+            f"Исполнитель: <@{fulfiller_id}>\n\n"
+            f"Админ может использовать `/token-resolve {self.request_id} approve` или `reject`."
+        )
+
         await interaction.message.edit(view=None)
         await interaction.response.send_message(
-            f"Создан спор по жетону. Админ может использовать `/token-resolve {self.request_id} approve` или `reject`."
+            f"Создан спор по жетону. Тред: {thread.mention}",
         )
 
 
