@@ -57,8 +57,16 @@ class TokenRequestView(discord.ui.View):
             select.callback = self.token_select_callback
             self.add_item(select)
 
+        # Button added after select to ensure correct order
+        button = discord.ui.Button(
+            label="Создать запрос",
+            style=discord.ButtonStyle.primary,
+            custom_id="token_create",
+        )
+        button.callback = self.create_request
+        self.add_item(button)
+
     async def token_select_callback(self, interaction: discord.Interaction):
-        select = interaction.data  # raw interaction data
         token_ids = [int(v) for v in interaction.data.get("values", [])]
         self.selected_tokens[interaction.user.id] = token_ids
         await interaction.response.send_message(
@@ -66,8 +74,7 @@ class TokenRequestView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Создать запрос", style=discord.ButtonStyle.primary, custom_id="token_create")
-    async def create_request(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def create_request(self, interaction: discord.Interaction):
         user_id = interaction.user.id
         selected = self.selected_tokens.get(user_id)
         if not selected:
