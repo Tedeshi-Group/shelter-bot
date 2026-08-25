@@ -20,6 +20,7 @@ class TokenRequest(Base):
     status: Mapped[str] = mapped_column(String(20), default="open")  # open, in_progress, confirmed, disputed, rejected, closed
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # private notification thread
     creation_bonus: Mapped[bool] = mapped_column(default=False)  # eligible for creation bonus
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
