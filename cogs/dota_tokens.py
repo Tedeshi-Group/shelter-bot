@@ -343,13 +343,31 @@ class DisputeButton(discord.ui.Button):
                 return
 
             request.status = "disputed"
+
+            # Get fulfiller
+            fulfillment = (await db.execute(
+                select(TokenFulfillment).where(TokenFulfillment.request_id == self.request_id)
+            )).scalar_one_or_none()
+
             await db.commit()
 
-        # Create thread for discussion
+        # Create private thread for discussion
         thread = await interaction.message.create_thread(
             name=f"Спор по запросу #{self.request_id}",
             auto_archive_duration=1440,
+            type=discord.ChannelType.private_thread,
         )
+
+        # Add requester and fulfiller
+        await thread.add_user(interaction.user)
+        if fulfillment:
+            try:
+                fulfiller_member = interaction.guild.get_member(fulfillment.fulfiller_id)
+                if fulfiller_member:
+                    await thread.add_user(fulfiller_member)
+            except discord.HTTPException:
+                pass
+
         await thread.send(
             f"Спор создан. Ожидайте решения администратора.\n"
             f"Заказчик: <@{request.requester_id}>\n"
