@@ -15,6 +15,12 @@ from models import User, VoiceSession, Achievement, AchievementLevel, UserAchiev
 
 load_dotenv()
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] [%(levelname)-8s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
+
 TOKEN = os.getenv('DISCORD_TOKEN')
 GUILD_ID = int(os.getenv('GUILD_ID', '1307622842048839731'))
 
