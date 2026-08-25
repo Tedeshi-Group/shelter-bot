@@ -145,10 +145,7 @@ class TokenRequestView(discord.ui.View):
     async def token_select_callback(self, interaction: discord.Interaction):
         token_ids = [int(v) for v in interaction.data.get("values", [])]
         self.selected_tokens[interaction.user.id] = token_ids
-        await interaction.response.send_message(
-            f"Выбрано жетонов: {len(token_ids)}. Нажмите «Создать запрос».",
-            ephemeral=True,
-        )
+        await interaction.response.defer()
 
     async def create_request(self, interaction: discord.Interaction):
         user_id = interaction.user.id
@@ -198,17 +195,6 @@ class TokenRequestView(discord.ui.View):
                 user.steam_nickname = steam_info.get('nickname')
                 user.steam_avatar_url = steam_info.get('avatar_url')
             await db.commit()
-
-        if steam_info:
-            await interaction.followup.send(
-                f"Steam профиль сохранён! Ник: **{steam_info.get('nickname', 'неизвестно')}**",
-                ephemeral=True,
-            )
-        else:
-            await interaction.followup.send(
-                "Не удалось распарсить Steam профиль, но ссылка сохранена.",
-                ephemeral=True,
-            )
 
         # Create the request
         await self._do_create_request(interaction, user_id, selected)
@@ -285,11 +271,6 @@ class TokenRequestView(discord.ui.View):
             await db2.commit()
 
         self.selected_tokens.pop(user_id, None)
-
-        await interaction.followup.send(
-            f"Запрос #{request.id} создан!",
-            ephemeral=True,
-        )
 
     @staticmethod
     def _build_request_embed(
@@ -436,9 +417,7 @@ class RequestView(discord.ui.View):
                 await interaction.message.delete()
             except discord.HTTPException:
                 pass
-            await interaction.response.send_message(
-                f"Все жетоны отправлены! Запрос #{self.request_id} выполнен. +{len(request.tokens)} очков дружбы!",
-            )
+            await interaction.response.defer()
         else:
             # Update main embed with remaining tokens
             remaining = [t for t in request.tokens if not t.fulfilled]
@@ -455,11 +434,7 @@ class RequestView(discord.ui.View):
             embed = TokenRequestView._build_request_embed(request, remaining_tokens, requester, "in_progress", db_user)
             new_view = RequestView(self.request_id, remaining_tokens)
             await interaction.message.edit(embed=embed, view=new_view)
-
-            await interaction.response.send_message(
-                f"Жетон **{token_name}** отправлен! +1 очко дружбы.",
-                ephemeral=True,
-            )
+            await interaction.response.defer()
 
     async def _get_or_create_thread(
         self, interaction: discord.Interaction, request: TokenRequest
@@ -540,7 +515,7 @@ class TokenConfirmView(discord.ui.View):
             await db.commit()
 
         await interaction.message.edit(view=None)
-        await interaction.response.send_message("Жетон подтверждён!")
+        await interaction.response.defer()
 
         if all_confirmed:
             # Delete thread
@@ -652,7 +627,7 @@ class CloseButton(discord.ui.Button):
                 except discord.HTTPException:
                     pass
 
-        await interaction.response.send_message("Запрос закрыт.", ephemeral=True)
+        await interaction.response.defer()
 
 
 # --- Cog ---
