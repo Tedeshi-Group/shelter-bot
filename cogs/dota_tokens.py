@@ -173,6 +173,7 @@ class TokenRequestView(discord.ui.View):
             return
 
         # User has Steam info, proceed with creation
+        await interaction.response.defer()
         await self._do_create_request(interaction, user_id, selected)
 
     async def _process_steam_and_create(
