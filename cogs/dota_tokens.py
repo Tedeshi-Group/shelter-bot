@@ -439,15 +439,36 @@ class DotaTokens(commands.Cog):
         # Try to find existing view message
         async for message in channel.history(limit=10):
             if message.author == self.bot.user and message.components:
-                log.info("Persistent view message already exists")
-                return  # View already exists
+                # Update existing message with new embed
+                embed = discord.Embed(
+                    title="Обмен жетонами Dota 2",
+                    description=(
+                        "Выберите нужные жетоны из меню и нажмите **«Создать запрос»**.\n\n"
+                        "Обменивайтесь нужными жетонами и зарабатывайте **очки дружбы** "
+                        "за отправленные жетоны.\n\n"
+                        "В конце события мы подсчитаем лидеров по очкам и выдадим им:\n"
+                        "🏆 **Топ-3** получат Dota Plus на месяц или эквивалент в деньгах"
+                    ),
+                    color=discord.Color.blue(),
+                )
+                embed.set_image(url="https://clan.fastly.steamstatic.com/images/3703047/7942925df6ae43659acf60f2d2ff827461c02485.png")
+                await message.edit(embed=embed, view=view)
+                log.info("Persistent view message updated")
+                return
 
         # Send new persistent view
         embed = discord.Embed(
             title="Обмен жетонами Dota 2",
-            description="Выберите нужные жетоны из меню и нажмите «Создать запрос».",
+            description=(
+                "Выберите нужные жетоны из меню и нажмите **«Создать запрос»**.\n\n"
+                "Обменивайтесь нужными жетонами и зарабатывайте **очки дружбы** "
+                "за отправленные жетоны.\n\n"
+                "В конце события мы подсчитаем лидеров по очкам и выдадим им:\n"
+                "🏆 **Топ-3** получат Dota Plus на месяц или эквивалент в деньгах"
+            ),
             color=discord.Color.blue(),
         )
+        embed.set_image(url="https://clan.fastly.steamstatic.com/images/3703047/7942925df6ae43659acf60f2d2ff827461c02485.png")
         await channel.send(embed=embed, view=view)
         log.info("Persistent view message sent to channel")
 
