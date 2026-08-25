@@ -31,19 +31,28 @@ AUTO_CONFIRM_HOURS = 24
 class TokenRequestView(discord.ui.View):
     """Persistent view in the token channel with select menu + create button."""
 
-    def __init__(self):
+    def __init__(self, tokens: list[DotaToken] | None = None):
         super().__init__(timeout=None)
         self.selected_tokens: dict[int, list[int]] = {}  # user_id -> [token_ids]
 
-    @discord.ui.select(
-        cls=discord.ui.Select,
-        placeholder="Выберите жетоны (макс 5)...",
-        min_values=1,
-        max_values=MAX_TOKENS_PER_REQUEST,
-        custom_id="token_select",
-    )
-    async def token_select(self, interaction: discord.Interaction, select: discord.ui.Select):
-        token_ids = [int(v) for v in select.values]
+        if tokens:
+            options = [
+                discord.SelectOption(label=t.name, value=str(t.id), emoji=t.emoji)
+                for t in tokens
+            ][:25]  # Discord max 25 options
+            select = discord.ui.Select(
+                placeholder="Выберите жетоны (макс 5)...",
+                min_values=1,
+                max_values=min(MAX_TOKENS_PER_REQUEST, len(options)),
+                custom_id="token_select",
+                options=options,
+            )
+            select.callback = self.token_select_callback
+            self.add_item(select)
+
+    async def token_select_callback(self, interaction: discord.Interaction):
+        select = interaction.data  # raw interaction data
+        token_ids = [int(v) for v in interaction.data.get("values", [])]
         self.selected_tokens[interaction.user.id] = token_ids
         await interaction.response.send_message(
             f"Выбрано жетонов: {len(token_ids)}. Нажмите «Создать запрос».",
@@ -383,24 +392,34 @@ class DotaTokens(commands.Cog):
     async def _setup_persistent_view(self):
         """Register persistent view and send it to the token channel if needed."""
         log.info("Setting up persistent view for channel %s", TOKEN_CHANNEL_ID)
-        view = TokenRequestView()
-        self.bot.add_view(view)
 
-        # Also register existing request views
+        # Fetch tokens from DB
         async with AsyncSessionLocal() as db:
+            tokens = (await db.execute(
+                select(DotaToken).order_by(DotaToken.name)
+            )).scalars().all()
+
+            # Also register existing request views
             active_requests = (await db.execute(
                 select(TokenRequest).where(TokenRequest.status.in_(["open", "in_progress"]))
             )).scalars().all()
 
-            for req in active_requests:
-                if req.status == "open":
-                    rv = RequestView(req.id)
-                else:
-                    rv = RequestView(req.id)
-                    rv.clear_items()
-                    rv.add_item(ConfirmButton(req.id))
-                    rv.add_item(DisputeButton(req.id))
-                self.bot.add_view(rv)
+        if not tokens:
+            log.info("No tokens in DB, skipping persistent view send")
+            return
+
+        view = TokenRequestView(tokens)
+        self.bot.add_view(view)
+
+        for req in active_requests:
+            if req.status == "open":
+                rv = RequestView(req.id)
+            else:
+                rv = RequestView(req.id)
+                rv.clear_items()
+                rv.add_item(ConfirmButton(req.id))
+                rv.add_item(DisputeButton(req.id))
+            self.bot.add_view(rv)
 
         # Check if persistent view message exists in channel
         channel = self.bot.get_channel(TOKEN_CHANNEL_ID)
@@ -676,6 +695,9 @@ class DotaTokens(commands.Cog):
                 select(DotaToken).order_by(DotaToken.name)
             )).scalars().all()
 
+        if not tokens:
+            return
+
         channel = self.bot.get_channel(TOKEN_CHANNEL_ID)
         if not channel:
             return
@@ -683,12 +705,7 @@ class DotaTokens(commands.Cog):
         # Find and update the view message
         async for message in channel.history(limit=10):
             if message.author == self.bot.user and message.components:
-                view = TokenRequestView()
-                select_menu = view.children[0]  # The select menu
-                select_menu.options = [
-                    discord.SelectOption(label=t.name, value=str(t.id), emoji=t.emoji)
-                    for t in tokens
-                ]
+                view = TokenRequestView(tokens)
                 await message.edit(view=view)
                 break
 
