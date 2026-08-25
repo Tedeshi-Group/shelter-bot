@@ -110,11 +110,22 @@ class TokenRequestView(discord.ui.View):
 
             # Create request
             now = datetime.now(timezone.utc).replace(tzinfo=None)
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+            # Check if requester already got creation bonus today
+            bonus_today = (await db.execute(
+                select(TokenRequest)
+                .where(TokenRequest.requester_id == user_id)
+                .where(TokenRequest.creation_bonus == True)
+                .where(TokenRequest.created_at >= today_start)
+            )).scalar_one_or_none()
+
             request = TokenRequest(
                 requester_id=user_id,
                 status="open",
                 channel_id=TOKEN_CHANNEL_ID,
                 created_at=now,
+                creation_bonus=bonus_today is None,  # eligible if no bonus today
             )
             db.add(request)
             await db.flush()
@@ -129,7 +140,14 @@ class TokenRequestView(discord.ui.View):
             embed = self._build_request_embed(request, tokens, interaction.user, "open")
             view = RequestView(request.id)
 
-            msg = await interaction.channel.send(embed=embed, view=view)
+            # Create public thread for the request
+            thread = await interaction.channel.create_thread(
+                name=f"Запрос #{request.id} — {', '.join(t.name for t in tokens[:3])}",
+                auto_archive_duration=1440,
+                type=discord.ChannelType.public_thread,
+            )
+
+            msg = await thread.send(embed=embed, view=view)
 
             # Update request with message_id
             async with AsyncSessionLocal() as db2:
@@ -141,7 +159,7 @@ class TokenRequestView(discord.ui.View):
             self.selected_tokens.pop(user_id, None)
 
             await interaction.response.send_message(
-                f"Запрос #{request.id} создан!",
+                f"Запрос #{request.id} создан! Тред: {thread.mention}",
                 ephemeral=True,
             )
 
@@ -159,6 +177,7 @@ class TokenRequestView(discord.ui.View):
             "confirmed": discord.Color.green(),
             "disputed": discord.Color.red(),
             "rejected": discord.Color.dark_red(),
+            "closed": discord.Color.dark_grey(),
         }
         status_labels = {
             "open": "Открыт",
@@ -166,6 +185,7 @@ class TokenRequestView(discord.ui.View):
             "confirmed": "Выполнен",
             "disputed": "Спор",
             "rejected": "Отклонён",
+            "closed": "Закрыт",
         }
 
         embed = discord.Embed(
@@ -187,12 +207,30 @@ class TokenRequestView(discord.ui.View):
 class RequestView(discord.ui.View):
     """Persistent view on each request embed with action buttons."""
 
-    def __init__(self, request_id: int):
+    def __init__(self, request_id: int, tokens: list[DotaToken] | None = None):
         super().__init__(timeout=None)
         self.request_id = request_id
 
-    @discord.ui.button(label="Выполнить", style=discord.ButtonStyle.success, custom_id="token_fulfill")
-    async def fulfill_request(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if tokens:
+            options = [
+                discord.SelectOption(label=t.name, value=str(t.id), emoji=_parse_emoji(t.emoji))
+                for t in tokens
+            ][:25]
+            select = discord.ui.Select(
+                placeholder="Выберите жетон для отправки...",
+                min_values=1,
+                max_values=1,
+                custom_id=f"token_fulfill_{request_id}",
+                options=options,
+            )
+            select.callback = self.fulfill_callback
+            self.add_item(select)
+
+        self.add_item(CloseButton(request_id))
+
+    async def fulfill_callback(self, interaction: discord.Interaction):
+        token_id = int(interaction.data["values"][0])
+
         async with AsyncSessionLocal() as db:
             request = (await db.execute(
                 select(TokenRequest)
@@ -200,12 +238,23 @@ class RequestView(discord.ui.View):
                 .where(TokenRequest.id == self.request_id)
             )).scalar_one_or_none()
 
-            if not request or request.status != "open":
+            if not request or request.status not in ("open", "in_progress"):
                 await interaction.response.send_message("Этот запрос уже недоступен.", ephemeral=True)
                 return
 
             if request.requester_id == interaction.user.id:
                 await interaction.response.send_message("Нельзя выполнять свой собственный запрос.", ephemeral=True)
+                return
+
+            # Find the unfulfilled item
+            item = None
+            for t in request.tokens:
+                if t.token_id == token_id and not t.fulfilled:
+                    item = t
+                    break
+
+            if not item:
+                await interaction.response.send_message("Этот жетон уже отправлен или не найден.", ephemeral=True)
                 return
 
             # Ensure fulfiller exists
@@ -217,32 +266,72 @@ class RequestView(discord.ui.View):
                 db.add(fulfiller)
                 await db.flush()
 
+            # Mark item as fulfilled
             now = datetime.now(timezone.utc).replace(tzinfo=None)
-            request.status = "in_progress"
-            request.expires_at = now + timedelta(hours=AUTO_CONFIRM_HOURS)
+            item.fulfilled = True
+            item.fulfilled_by = interaction.user.id
+            item.fulfilled_at = now
 
-            db.add(TokenFulfillment(
-                request_id=request.id,
-                fulfiller_id=interaction.user.id,
-                created_at=now,
-            ))
+            # Give friendship point
+            fulfiller.friendship_points += 1
+
+            # Update request status if needed
+            if request.status == "open":
+                request.status = "in_progress"
+                request.expires_at = now + timedelta(hours=AUTO_CONFIRM_HOURS)
+
+            # Check if all tokens are fulfilled
+            all_fulfilled = all(t.fulfilled for t in request.tokens)
+
+            if all_fulfilled:
+                request.status = "confirmed"
+
+                # Award creation bonus if eligible
+                if request.creation_bonus:
+                    requester = await db.get(User, request.requester_id)
+                    if requester:
+                        requester.friendship_points += 1
+
             await db.commit()
 
-        # Update embed
-        await self._update_embed(interaction, "in_progress", interaction.user)
+            # Get token name for message
+            token = await db.get(DotaToken, token_id)
+            token_name = token.name if token else "жетон"
 
-        # Replace buttons
-        self.clear_items()
-        self.add_item(ConfirmButton(self.request_id))
-        self.add_item(DisputeButton(self.request_id))
-        await interaction.message.edit(view=self)
+        if all_fulfilled:
+            # All tokens fulfilled - auto-confirm
+            bonus_msg = " +1 очко за создание запроса!" if request.creation_bonus else ""
+            await self._update_embed(interaction, "confirmed")
+            await interaction.message.edit(view=None)
+            await interaction.response.send_message(
+                f"Все жетоны отправлены! Запрос #{self.request_id} выполнен. +{len(request.tokens)} очков дружбы!{bonus_msg}",
+            )
+            # Archive thread
+            if interaction.message.thread:
+                await interaction.message.thread.edit(archived=True, locked=True)
+        else:
+            # Rebuild view with remaining tokens
+            remaining = [t for t in request.tokens if not t.fulfilled]
+            remaining_tokens = []
+            async with AsyncSessionLocal() as db:
+                for item in remaining:
+                    token = await db.get(DotaToken, item.token_id)
+                    if token:
+                        remaining_tokens.append(token)
 
-        await interaction.response.send_message(
-            f"Вы взялись выполнить запрос #{self.request_id}. У заказчика есть {AUTO_CONFIRM_HOURS}ч на подтверждение.",
-            ephemeral=True,
-        )
+            # Update embed
+            await self._update_embed(interaction, "in_progress")
 
-    async def _update_embed(self, interaction: discord.Interaction, status: str, fulfiller: discord.User | None = None):
+            # Rebuild view
+            new_view = RequestView(self.request_id, remaining_tokens)
+            await interaction.message.edit(view=new_view)
+
+            await interaction.response.send_message(
+                f"Жетон **{token_name}** отправлен! +1 очко дружбы. Осталось жетонов: {len(remaining)}",
+                ephemeral=True,
+            )
+
+    async def _update_embed(self, interaction: discord.Interaction, status: str):
         async with AsyncSessionLocal() as db:
             request = (await db.execute(
                 select(TokenRequest)
@@ -257,7 +346,7 @@ class RequestView(discord.ui.View):
             )).scalars().all()
 
         requester = interaction.guild.get_member(request.requester_id) or await interaction.guild.fetch_member(request.requester_id)
-        embed = TokenRequestView._build_request_embed(request, tokens, requester, status, fulfiller)
+        embed = TokenRequestView._build_request_embed(request, tokens, requester, status)
         await interaction.message.edit(embed=embed)
 
 
@@ -378,6 +467,60 @@ class DisputeButton(discord.ui.Button):
         await self._update_embed(interaction, "disputed")
         await interaction.message.edit(view=None)
         await interaction.response.send_message("Спор создан. Администратор рассмотрит его.", ephemeral=True)
+
+    async def _update_embed(self, interaction: discord.Interaction, status: str):
+        async with AsyncSessionLocal() as db:
+            request = (await db.execute(
+                select(TokenRequest)
+                .options(selectinload(TokenRequest.tokens))
+                .where(TokenRequest.id == self.request_id)
+            )).scalar_one_or_none()
+            if not request:
+                return
+
+            tokens = (await db.execute(
+                select(DotaToken).where(DotaToken.id.in_([t.token_id for t in request.tokens]))
+            )).scalars().all()
+
+        requester = interaction.guild.get_member(request.requester_id) or await interaction.guild.fetch_member(request.requester_id)
+        embed = TokenRequestView._build_request_embed(request, tokens, requester, status)
+        await interaction.message.edit(embed=embed)
+
+
+class CloseButton(discord.ui.Button):
+    def __init__(self, request_id: int):
+        super().__init__(label="Закрыть", style=discord.ButtonStyle.secondary, custom_id=f"token_close_{request_id}")
+        self.request_id = request_id
+
+    async def callback(self, interaction: discord.Interaction):
+        async with AsyncSessionLocal() as db:
+            request = (await db.execute(
+                select(TokenRequest).where(TokenRequest.id == self.request_id)
+            )).scalar_one_or_none()
+
+            if not request:
+                await interaction.response.send_message("Запрос не найден.", ephemeral=True)
+                return
+
+            if request.requester_id != interaction.user.id:
+                await interaction.response.send_message("Только автор запроса может закрыть его.", ephemeral=True)
+                return
+
+            if request.status not in ("open", "in_progress"):
+                await interaction.response.send_message("Этот запрос уже завершён.", ephemeral=True)
+                return
+
+            request.status = "closed"
+            await db.commit()
+
+        # Update embed
+        await self._update_embed(interaction, "closed")
+        await interaction.message.edit(view=None)
+        await interaction.response.send_message("Запрос закрыт.", ephemeral=True)
+
+        # Archive thread
+        if interaction.message.thread:
+            await interaction.message.thread.edit(archived=True, locked=True)
 
     async def _update_embed(self, interaction: discord.Interaction, status: str):
         async with AsyncSessionLocal() as db:
@@ -595,6 +738,13 @@ class DotaTokens(commands.Cog):
                     fulfiller = await db.get(User, fulfillment.fulfiller_id)
                     if fulfiller:
                         fulfiller.friendship_points += 1
+
+                # Award creation bonus if eligible
+                if request.creation_bonus:
+                    requester = await db.get(User, request.requester_id)
+                    if requester:
+                        requester.friendship_points += 1
+
                 await db.commit()
                 await interaction.response.send_message(f"Запрос #{request_id} подтверждён. Очки дружбы начислены.", ephemeral=True)
             else:
@@ -708,6 +858,12 @@ class DotaTokens(commands.Cog):
                     fulfiller = await db.get(User, fulfillment.fulfiller_id)
                     if fulfiller:
                         fulfiller.friendship_points += 1
+
+                # Award creation bonus if eligible
+                if request.creation_bonus:
+                    requester = await db.get(User, request.requester_id)
+                    if requester:
+                        requester.friendship_points += 1
 
                 request.status = "confirmed"
                 await db.commit()
