@@ -26,6 +26,17 @@ intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 
+@bot.event
+async def setup_hook():
+    """Load cogs before on_ready fires."""
+    for ext in ["cogs.voice_channels", "cogs.moderation", "cogs.dota_tokens"]:
+        try:
+            await bot.load_extension(ext)
+            logging.info("Loaded cog: %s", ext)
+        except Exception:
+            logging.error("Ошибка загрузки кога %s:\n%s", ext, traceback.format_exc())
+
+
 @tasks.loop(minutes=10)
 async def refresh_sessions():
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -67,23 +78,9 @@ async def on_ready():
     bot.tree.copy_global_to(guild=guild)
     await bot.tree.sync(guild=guild)
 
-    try:
-        await bot.load_extension("cogs.voice_channels")
-        voice_cog = bot.get_cog("VoiceChannels")
-        if voice_cog:
-            await voice_cog._ensure_new_voice_exists()
-    except Exception:
-        logging.error("Ошибка загрузки кога voice_channels:\n%s", traceback.format_exc())
-
-    try:
-        await bot.load_extension("cogs.moderation")
-    except Exception:
-        logging.error("Ошибка загрузки кога moderation:\n%s", traceback.format_exc())
-
-    try:
-        await bot.load_extension("cogs.dota_tokens")
-    except Exception:
-        logging.error("Ошибка загрузки кога dota_tokens:\n%s", traceback.format_exc())
+    voice_cog = bot.get_cog("VoiceChannels")
+    if voice_cog:
+        await voice_cog._ensure_new_voice_exists()
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     async with AsyncSessionLocal() as db:
