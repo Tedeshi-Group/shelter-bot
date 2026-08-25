@@ -21,6 +21,7 @@ GUILD_ID = int(os.getenv('GUILD_ID', '1307622842048839731'))
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
+intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
@@ -73,6 +74,11 @@ async def on_ready():
             await voice_cog._ensure_new_voice_exists()
     except Exception:
         logging.error("Ошибка загрузки кога voice_channels:\n%s", traceback.format_exc())
+
+    try:
+        await bot.load_extension("cogs.moderation")
+    except Exception:
+        logging.error("Ошибка загрузки кога moderation:\n%s", traceback.format_exc())
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     async with AsyncSessionLocal() as db:

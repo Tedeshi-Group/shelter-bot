@@ -66,86 +66,55 @@ class RegionView(discord.ui.View):
         self.add_item(RegionSelect())
 
 
-def _build_deaf_options(channel: discord.VoiceChannel, invoker: discord.Member) -> list[discord.SelectOption]:
-    options = [discord.SelectOption(label="ВСЕХ", value="__all__", emoji="🔇")]
-    for member in channel.members:
-        if member.bot:
-            continue
-        status = "🔇" if member.voice.deaf else "🔊"
-        options.append(discord.SelectOption(
-            label=member.display_name,
-            value=str(member.id),
-            emoji=status,
-        ))
-    return options
-
-
-class DeafSelect(discord.ui.Select):
-    def __init__(self, channel: discord.VoiceChannel, invoker: discord.Member, cog: "VoiceChannels"):
+class DeafToggleButton(discord.ui.Button):
+    def __init__(self, cog: "VoiceChannels"):
         super().__init__(
-            placeholder="Кого отключить от звука?",
-            options=_build_deaf_options(channel, invoker),
-            min_values=1,
-            max_values=1,
+            label="Переключить мне звук",
+            style=discord.ButtonStyle.danger,
+            emoji="🔇",
+            custom_id="voice_deaf_toggle",
         )
         self.cog = cog
 
     async def callback(self, interaction: discord.Interaction):
         channel = interaction.channel
         if not isinstance(channel, discord.VoiceChannel):
-            await interaction.response.send_message("Это меню работает только в голосовых каналах.", ephemeral=True)
+            await interaction.response.send_message("Эта кнопка работает только в голосовых каналах.", ephemeral=True)
             return
 
-        if not (interaction.user.guild_permissions.manage_channels or interaction.user.guild_permissions.administrator):
-            await interaction.response.send_message("У вас нет прав для управления звуком.", ephemeral=True)
+        member = interaction.user
+        if not isinstance(member, discord.Member) or not member.voice or member.voice.channel is None:
+            await interaction.response.send_message("Вы должны быть в голосовом канале.", ephemeral=True)
             return
 
-        target_id = self.values[0]
         ch_id = channel.id
-
         if ch_id not in self.cog.deaf_states:
             self.cog.deaf_states[ch_id] = set()
 
-        if target_id == "__all__":
-            humans = [m for m in channel.members if not m.bot]
-            should_deaf = any(m.id not in self.cog.deaf_states[ch_id] for m in humans)
-            for member in humans:
-                await member.edit(deafen=should_deaf)
-                if should_deaf:
-                    self.cog.deaf_states[ch_id].add(member.id)
-                else:
-                    self.cog.deaf_states[ch_id].discard(member.id)
-            state = "отключён" if should_deaf else "включён"
-            await interaction.response.send_message(f"Звук **{state}** для всех участников.", ephemeral=True)
-        else:
-            member = channel.guild.get_member(int(target_id))
-            if not member:
-                await interaction.response.send_message("Участник не найден.", ephemeral=True)
-                return
-            is_deafned = member.id in self.cog.deaf_states[ch_id]
-            await member.edit(deafen=not is_deafned)
-            if not is_deafned:
-                self.cog.deaf_states[ch_id].add(member.id)
-            else:
-                self.cog.deaf_states[ch_id].discard(member.id)
-            state = "отключён" if not is_deafned else "включён"
-            await interaction.response.send_message(f"Звук **{state}** для **{member.display_name}**.", ephemeral=True)
+        is_deafned = member.voice.deaf
+        await member.edit(deafen=not is_deafned)
 
-        self.options = _build_deaf_options(channel, interaction.user)
-        await interaction.message.edit(view=self.view)
+        if is_deafned:
+            self.cog.deaf_states[ch_id].discard(member.id)
+        else:
+            self.cog.deaf_states[ch_id].add(member.id)
+
+        state = "отключён" if not is_deafned else "включён"
+        await interaction.response.send_message(f"Ваш звук **{state}**.", ephemeral=True)
 
 
 class DeafView(discord.ui.View):
-    def __init__(self, channel: discord.VoiceChannel, invoker: discord.Member, cog: "VoiceChannels"):
+    def __init__(self, cog: "VoiceChannels"):
         super().__init__(timeout=None)
-        self.add_item(DeafSelect(channel, invoker, cog))
+        self.add_item(DeafToggleButton(cog))
 
 
 class VoiceChannels(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.active_timers: dict[int, asyncio.Task] = {}
-        self.deaf_states: dict[int, set[int]] = {}
+        self.deaf_states: dict[int, set[int]] = {}  # channel_id -> set of member ids
+        self.bot.add_view(DeafView(self))
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -211,6 +180,9 @@ class VoiceChannels(commands.Cog):
                 ))
                 await db.commit()
 
+                # Лог в архивный тред
+                await self._log_voice_event(after.channel, member, "зашёл", discord.Color.green())
+
             elif before.channel is not None and after.channel is None:
                 # Left voice channels
                 open_sessions = (await db.execute(
@@ -223,6 +195,9 @@ class VoiceChannels(commands.Cog):
                     session.left_at = now
                     session.duration_seconds = int((now - session.joined_at).total_seconds())
                 await db.commit()
+
+                # Лог в архивный тред
+                await self._log_voice_event(before.channel, member, "вышел", discord.Color.red())
 
                 # Check voice achievements
                 await self._check_and_notify_achievements(member, [
@@ -258,6 +233,23 @@ class VoiceChannels(commands.Cog):
                     "voice_lone_wolf",
                 ])
 
+        # --- Deaf state management ---
+        if before.channel and before.channel.category_id == VOICE_CATEGORY_ID:
+            ch_id = before.channel.id
+            if ch_id in self.deaf_states and member.id in self.deaf_states[ch_id]:
+                try:
+                    await member.edit(deafen=False)
+                except (discord.HTTPException, discord.Forbidden):
+                    pass
+
+        if after.channel and after.channel.category_id == VOICE_CATEGORY_ID:
+            ch_id = after.channel.id
+            if ch_id in self.deaf_states and member.id in self.deaf_states[ch_id]:
+                try:
+                    await member.edit(deafen=True)
+                except (discord.HTTPException, discord.Forbidden):
+                    pass
+
         # --- Temporary voice channel management ---
         if before.channel and before.channel.category_id == VOICE_CATEGORY_ID:
             if before.channel.name == NEW_VOICE_NAME:
@@ -271,13 +263,6 @@ class VoiceChannels(commands.Cog):
         if after.channel and after.channel.category_id == VOICE_CATEGORY_ID:
             if after.channel.name == NEW_VOICE_NAME:
                 await self._handle_new_voice_join(after.channel, member)
-
-            ch_id = after.channel.id
-            if ch_id in self.deaf_states and member.id in self.deaf_states[ch_id]:
-                try:
-                    await member.edit(deafen=True)
-                except (discord.HTTPException, discord.Forbidden):
-                    pass
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -294,29 +279,16 @@ class VoiceChannels(commands.Cog):
         if not channel.name.startswith(VOICE_CHANNEL_PREFIX):
             return
 
+        if not hasattr(self, '_voice_threads') or channel.id not in self._voice_threads:
+            return
+
         archive_channel = self.bot.get_channel(ARCHIVE_CHANNEL_ID)
         if not archive_channel:
             return
 
-        if not hasattr(self, '_voice_threads'):
-            self._voice_threads = {}
-
-        if channel.id not in self._voice_threads:
-            thread = await archive_channel.create_thread(
-                name=channel.name,
-                type=discord.ChannelType.private_thread
-            )
-            self._voice_threads[channel.id] = thread.id
-
-        thread_id = self._voice_threads[channel.id]
-        thread = archive_channel.get_thread(thread_id)
-
+        thread = archive_channel.get_thread(self._voice_threads[channel.id])
         if not thread:
-            thread = await archive_channel.create_thread(
-                name=channel.name,
-                type=discord.ChannelType.private_thread
-            )
-            self._voice_threads[channel.id] = thread.id
+            return
 
         try:
             embed = discord.Embed(
@@ -386,6 +358,29 @@ class VoiceChannels(commands.Cog):
         )
         await channel.set_permissions(creator, overwrite=overwrite)
 
+        # Создать архивный тред для этого войса
+        if not hasattr(self, '_voice_threads'):
+            self._voice_threads = {}
+
+        archive_channel = self.bot.get_channel(ARCHIVE_CHANNEL_ID)
+        if archive_channel:
+            try:
+                thread = await archive_channel.create_thread(
+                    name=new_name,
+                    type=discord.ChannelType.private_thread,
+                )
+                self._voice_threads[channel.id] = thread.id
+
+                create_embed = discord.Embed(
+                    title="🔊 Голосовой канал создан",
+                    description=f"Создатель: {creator.mention}",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now(timezone.utc),
+                )
+                await thread.send(embed=create_embed)
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
         embed = discord.Embed(
             description="Используйте меню ниже чтобы изменить регион войса.",
             color=discord.Color.green(),
@@ -393,10 +388,33 @@ class VoiceChannels(commands.Cog):
         await channel.send(embed=embed, view=RegionView())
 
         deaf_embed = discord.Embed(
-            description="Отключите звук участнику войса.",
+            description="Нажмите кнопку чтобы отключить/включить себе звук.",
             color=discord.Color.orange(),
         )
-        await channel.send(embed=deaf_embed, view=DeafView(channel, creator, self))
+        await channel.send(embed=deaf_embed, view=DeafView(self))
+
+    async def _log_voice_event(self, channel: discord.VoiceChannel, member: discord.Member, action: str, color: discord.Color):
+        if not hasattr(self, '_voice_threads') or channel.id not in self._voice_threads:
+            return
+
+        archive_channel = self.bot.get_channel(ARCHIVE_CHANNEL_ID)
+        if not archive_channel:
+            return
+
+        thread = archive_channel.get_thread(self._voice_threads[channel.id])
+        if not thread:
+            return
+
+        embed = discord.Embed(
+            description=f"{member.mention} {action} в голосовой канал",
+            color=color,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        try:
+            await thread.send(embed=embed)
+        except (discord.NotFound, discord.HTTPException):
+            pass
 
     async def _check_and_notify_achievements(self, member: discord.Member, achievement_names: list[str]):
         """Check achievements and notify user if any are unlocked."""
