@@ -897,7 +897,210 @@ class DotaTokens(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # --- Auto-confirm loop ---
+    # --- Deals command (admin) ---
+
+    @app_commands.command(name="deals", description="Управление сделками (только админы)")
+    async def deals(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Только администраторы могут использовать эту команду.", ephemeral=True)
+            return
+
+        async with AsyncSessionLocal() as db:
+            # Active deals
+            active = (await db.execute(
+                select(TokenRequest)
+                .where(TokenRequest.status.in_(["open", "in_progress"]))
+                .order_by(TokenRequest.created_at.desc())
+            )).scalars().all()
+
+            # Closed/completed deals (last 20)
+            closed = (await db.execute(
+                select(TokenRequest)
+                .where(TokenRequest.status.in_(["confirmed", "closed", "rejected", "disputed"]))
+                .order_by(TokenRequest.created_at.desc())
+                .limit(20)
+            )).scalars().all()
+
+        view = DealsMenuView(active, closed, interaction.user.id)
+        await interaction.response.send_message(
+            embed=self._build_deals_embed(active, closed),
+            view=view,
+            ephemeral=True,
+        )
+
+    @staticmethod
+    def _build_deals_embed(active: list[TokenRequest], closed: list[TokenRequest]) -> discord.Embed:
+        embed = discord.Embed(title="Управление сделками", color=discord.Color.blue())
+
+        if active:
+            active_lines = []
+            for r in active:
+                status_emoji = "🟢" if r.status == "open" else "🟡"
+                active_lines.append(f"{status_emoji} #{r.id} — <@{r.requester_id}>")
+            embed.add_field(name=f"Активные ({len(active)})", value="\n".join(active_lines), inline=False)
+        else:
+            embed.add_field(name="Активные", value="Нет активных сделок", inline=False)
+
+        if closed:
+            closed_lines = []
+            for r in closed:
+                status_emoji = {"confirmed": "✅", "closed": "⚫", "rejected": "❌", "disputed": "🔴"}.get(r.status, "⚪")
+                closed_lines.append(f"{status_emoji} #{r.id} — <@{r.requester_id}>")
+            embed.add_field(name=f"Завершённые ({len(closed)})", value="\n".join(closed_lines), inline=False)
+
+        return embed
+
+
+class DealsMenuView(discord.ui.View):
+    """Ephemeral view for managing deals."""
+
+    def __init__(self, active: list[TokenRequest], closed: list[TokenRequest], admin_id: int):
+        super().__init__(timeout=300)
+        self.admin_id = admin_id
+
+        # Active deals select
+        if active:
+            options = [
+                discord.SelectOption(
+                    label=f"#{r.id}",
+                    description=f"Статус: {r.status}",
+                    value=f"active_{r.id}",
+                    emoji="🟢" if r.status == "open" else "🟡",
+                )
+                for r in active
+            ][:25]
+            active_select = discord.ui.Select(
+                placeholder="Активные сделки...",
+                options=options,
+                custom_id="deals_active_select",
+            )
+            active_select.callback = self.active_select_callback
+            self.add_item(active_select)
+
+        # Closed deals select
+        if closed:
+            options = [
+                discord.SelectOption(
+                    label=f"#{r.id}",
+                    description=f"Статус: {r.status}",
+                    value=f"closed_{r.id}",
+                    emoji={"confirmed": "✅", "closed": "⚫", "rejected": "❌", "disputed": "🔴"}.get(r.status, "⚪"),
+                )
+                for r in closed
+            ][:25]
+            closed_select = discord.ui.Select(
+                placeholder="Завершённые сделки...",
+                options=options,
+                custom_id="deals_closed_select",
+            )
+            closed_select.callback = self.closed_select_callback
+            self.add_item(closed_select)
+
+    async def active_select_callback(self, interaction: discord.Interaction):
+        request_id = int(interaction.data["values"][0].split("_")[1])
+
+        view = DealActionView(request_id, self.admin_id)
+        await interaction.response.send_message(
+            f"Сделка #{request_id}",
+            view=view,
+            ephemeral=True,
+        )
+
+    async def closed_select_callback(self, interaction: discord.Interaction):
+        request_id = int(interaction.data["values"][0].split("_")[1])
+
+        async with AsyncSessionLocal() as db:
+            request = await db.get(TokenRequest, request_id)
+
+        if request and request.thread_id:
+            thread = interaction.guild.get_thread(request.thread_id)
+            if thread:
+                await interaction.response.send_message(
+                    f"Перейти к сделке: {thread.mention}",
+                    ephemeral=True,
+                )
+                return
+
+        await interaction.response.send_message(
+            f"Сделка #{request_id} — тред не найден.",
+            ephemeral=True,
+        )
+
+
+class DealActionView(discord.ui.View):
+    """Buttons for active deal management."""
+
+    def __init__(self, request_id: int, admin_id: int):
+        super().__init__(timeout=120)
+        self.request_id = request_id
+        self.admin_id = admin_id
+
+    @discord.ui.button(label="Закрыть принудительно", style=discord.ButtonStyle.danger, custom_id="deal_force_close")
+    async def force_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.admin_id:
+            await interaction.response.send_message("Только администратор может закрыть сделку.", ephemeral=True)
+            return
+
+        async with AsyncSessionLocal() as db:
+            request = (await db.execute(
+                select(TokenRequest)
+                .options(selectinload(TokenRequest.tokens))
+                .where(TokenRequest.id == self.request_id)
+            )).scalar_one_or_none()
+
+            if not request:
+                await interaction.response.send_message("Сделка не найдена.", ephemeral=True)
+                return
+
+            thread_id = request.thread_id
+            message_id = request.message_id
+            channel_id = request.channel_id
+            request.status = "closed"
+            await db.commit()
+
+        # Delete main message
+        if message_id and channel_id:
+            channel = interaction.guild.get_channel(channel_id)
+            if channel:
+                try:
+                    msg = await channel.fetch_message(message_id)
+                    await msg.delete()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+
+        # Delete thread
+        if thread_id:
+            thread = interaction.guild.get_thread(thread_id)
+            if thread:
+                try:
+                    await thread.delete()
+                except discord.HTTPException:
+                    pass
+
+        await interaction.response.send_message(f"Сделка #{self.request_id} закрыта.", ephemeral=True)
+
+    @discord.ui.button(label="Назад в меню", style=discord.ButtonStyle.secondary, custom_id="deal_back")
+    async def back_to_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with AsyncSessionLocal() as db:
+            active = (await db.execute(
+                select(TokenRequest)
+                .where(TokenRequest.status.in_(["open", "in_progress"]))
+                .order_by(TokenRequest.created_at.desc())
+            )).scalars().all()
+
+            closed = (await db.execute(
+                select(TokenRequest)
+                .where(TokenRequest.status.in_(["confirmed", "closed", "rejected", "disputed"]))
+                .order_by(TokenRequest.created_at.desc())
+                .limit(20)
+            )).scalars().all()
+
+        view = DealsMenuView(active, closed, self.admin_id)
+        embed = DotaTokens._build_deals_embed(active, closed)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+# --- Auto-confirm loop ---
 
     @tasks.loop(minutes=5)
     async def auto_confirm_loop(self):
