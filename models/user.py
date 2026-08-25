@@ -23,6 +23,7 @@ class User(Base):
         DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
     total_messages: Mapped[int] = mapped_column(Integer, default=0)
+    friendship_points: Mapped[int] = mapped_column(Integer, default=0)
 
     sessions: Mapped[list[VoiceSession]] = relationship(back_populates="user")
     messages: Mapped[list[MessageCounter]] = relationship(back_populates="user")
