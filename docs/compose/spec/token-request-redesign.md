@@ -1,15 +1,23 @@
 ---
 feature: token-request-redesign
-status: designed
+status: delivered
 updated: 2026-08-26
 branch: production
+commits: 4b9cc00..4b9cc00
 ---
 
 # Token Request Redesign
 
 ## Report
 
-(空 — will be filled at delivery)
+**What was built** — Redesigned token request flow. Requests now appear as embeds in main channel with Select menu for fulfillers. When someone fulfills a token, a private notification thread is created for the requester to confirm. Main message is deleted when all tokens are fulfilled. Private thread is deleted when all tokens are confirmed.
+
+**Verification** — `py_compile` passed. Migration created for `thread_id` column.
+
+**Journey log**:
+- Moved from public threads per request to embeds in main channel
+- Private threads now created per-deal for confirmations
+- Per-token Confirm/Dispute buttons replace single Confirm/Dispute per request
 
 ## [S1] Problem
 
@@ -69,12 +77,12 @@ Current flow creates public threads for each request, cluttering the channel. Us
 
 ## Tasks
 
-- [ ] T1: Add `thread_id` to TokenRequest model + migration — acceptance: column exists in DB (covers: S2)
-- [ ] T2: Rewrite request creation — acceptance: embed appears in main channel, no thread created (covers: S2)
-- [ ] T3: Rewrite fulfillment flow — acceptance: private thread created, notification sent, main embed updated (covers: S2)
-- [ ] T4: Add per-token Confirm/Dispute in private thread — acceptance: buttons work per-token (covers: S2)
-- [ ] T5: Handle "all tokens sent" — acceptance: main message deleted (covers: S2)
-- [ ] T6: Handle "all tokens confirmed" — acceptance: thread deleted, creation bonus awarded (covers: S2)
-- [ ] T7: Update Close button — acceptance: deletes main message and thread (covers: S2)
-- [ ] T8: Update auto-confirm loop — acceptance: handles new flow (covers: S2)
-- [ ] T9: Update persistent view registration — acceptance: views registered correctly on restart (covers: S2)
+- [x] T1: Add `thread_id` to TokenRequest model + migration — acceptance: column exists in DB (covers: S2)
+- [x] T2: Rewrite request creation — acceptance: embed appears in main channel, no thread created (covers: S2)
+- [x] T3: Rewrite fulfillment flow — acceptance: private thread created, notification sent, main embed updated (covers: S2)
+- [x] T4: Add per-token Confirm/Dispute in private thread — acceptance: buttons work per-token (covers: S2)
+- [x] T5: Handle "all tokens sent" — acceptance: main message deleted (covers: S2)
+- [x] T6: Handle "all tokens confirmed" — acceptance: thread deleted, creation bonus awarded (covers: S2)
+- [x] T7: Update Close button — acceptance: deletes main message and thread (covers: S2)
+- [x] T8: Update auto-confirm loop — acceptance: handles new flow (covers: S2)
+- [x] T9: Update persistent view registration — acceptance: views registered correctly on restart (covers: S2)
