@@ -56,13 +56,11 @@ class PerUserWaveSink(AudioSink):
         return False
 
     def write(self, user: discord.Member | None, data: VoiceData):
-        if user is None:
-            return
         ssrc = data.packet.ssrc
         if ssrc == 0:
             return
 
-        if ssrc not in self._user_map and user:
+        if user is not None and ssrc not in self._user_map:
             self._user_map[ssrc] = user.id
             self._username_map[ssrc] = user.display_name
 
