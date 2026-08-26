@@ -39,22 +39,27 @@ class PerUserWaveSink(AudioSink):
         self._username_map: dict[int, str] = {}  # ssrc -> username
         self._start_times: dict[int, float] = {}  # ssrc -> start time
         self._pcm_sizes: dict[int, int] = {}  # ssrc -> total PCM bytes
+        self._decoders: dict[int, discord.opus.Decoder] = {}  # ssrc -> decoder
         self._tracks_info: list[dict[str, Any]] = []
 
     def _get_file(self, ssrc: int) -> io.BufferedRandom:
         if ssrc not in self._files:
             path = os.path.join(self.temp_dir, f"track_{ssrc}.wav")
             f = open(path, "w+b")
-            # Write placeholder WAV header (44 bytes)
-            f.write(b'\x00' * 44)
+            f.write(b'\x00' * 44)  # placeholder WAV header
             self._files[ssrc] = f
             self._wav_headers[ssrc] = False
             self._pcm_sizes[ssrc] = 0
             self._start_times[ssrc] = time.time()
         return self._files[ssrc]
 
+    def _get_decoder(self, ssrc: int) -> discord.opus.Decoder:
+        if ssrc not in self._decoders:
+            self._decoders[ssrc] = discord.opus.Decoder()
+        return self._decoders[ssrc]
+
     def wants_opus(self) -> bool:
-        return False
+        return True
 
     def write(self, user: discord.Member | None, data: VoiceData):
         ssrc = data.packet.ssrc
@@ -65,9 +70,18 @@ class PerUserWaveSink(AudioSink):
             self._user_map[ssrc] = user.id
             self._username_map[ssrc] = user.display_name
 
+        # Decode opus to PCM ourselves (handles corrupted packets gracefully)
+        if data.opus is None:
+            return
+        try:
+            decoder = self._get_decoder(ssrc)
+            pcm = decoder.decode(data.opus)
+        except discord.opus.OpusError:
+            return  # skip corrupted packet
+
         f = self._get_file(ssrc)
-        f.write(data.pcm)
-        self._pcm_sizes[ssrc] = self._pcm_sizes.get(ssrc, 0) + len(data.pcm)
+        f.write(pcm)
+        self._pcm_sizes[ssrc] = self._pcm_sizes.get(ssrc, 0) + len(pcm)
 
     def _write_wav_header(self, f: io.BufferedRandom, data_size: int):
         f.seek(0)
