@@ -54,6 +54,8 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 async def setup_hook():
     """Load cogs before on_ready fires."""
     run_migrations()
+
+    # Load cogs
     for ext in ["cogs.voice_channels", "cogs.moderation"]:
         try:
             await bot.load_extension(ext)
