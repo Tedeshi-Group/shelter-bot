@@ -387,13 +387,19 @@ class RequestView(discord.ui.View):
 
             token = await db.get(DotaToken, token_id)
             token_name = token.name if token else "жетон"
+            expires_at = request.expires_at
 
         thread = await self._get_or_create_thread(interaction, request)
 
         confirm_view = TokenConfirmView(self.request_id, token_id)
+        if expires_at:
+            unix_ts = int(expires_at.replace(tzinfo=timezone.utc).timestamp())
+            auto_text = f"Сделка автоматически одобрится <t:{unix_ts}:R>"
+        else:
+            auto_text = f"Подтвердите в течение {AUTO_CONFIRM_HOURS}ч."
         embed = discord.Embed(
             title="Отправка жетона",
-            description=f"<@{interaction.user.id}> отправил жетон **{token_name}**.\nПодтвердите в течение {AUTO_CONFIRM_HOURS}ч.",
+            description=f"<@{interaction.user.id}> отправил жетон **{token_name}**.\n{auto_text}",
             color=discord.Color.yellow(),
         )
         await thread.send(
