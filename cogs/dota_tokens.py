@@ -391,8 +391,14 @@ class RequestView(discord.ui.View):
         thread = await self._get_or_create_thread(interaction, request)
 
         confirm_view = TokenConfirmView(self.request_id, token_id)
+        embed = discord.Embed(
+            title="Отправка жетона",
+            description=f"<@{interaction.user.id}> отправил жетон **{token_name}**.\nПодтвердите в течение {AUTO_CONFIRM_HOURS}ч.",
+            color=discord.Color.yellow(),
+        )
         await thread.send(
-            content=f"<@{request.requester_id}>, <@{interaction.user.id}> отправил жетон **{token_name}**. Подтвердите в течение {AUTO_CONFIRM_HOURS}ч.",
+            content=f"<@{request.requester_id}>",
+            embed=embed,
             view=confirm_view,
         )
 
@@ -526,7 +532,8 @@ class TokenConfirmView(discord.ui.View):
             request.status = "disputed"
             await db.commit()
 
-        thread = await interaction.channel.create_thread(
+        parent_channel = interaction.channel.parent if isinstance(interaction.channel, discord.Thread) else interaction.channel
+        thread = await parent_channel.create_thread(
             name=f"Спор #{self.request_id}",
             auto_archive_duration=1440,
             type=discord.ChannelType.private_thread,
