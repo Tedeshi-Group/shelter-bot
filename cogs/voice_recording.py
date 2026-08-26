@@ -39,6 +39,7 @@ class PerUserWaveSink(AudioSink):
         self._username_map: dict[int, str] = {}  # ssrc -> username
         self._start_times: dict[int, float] = {}  # ssrc -> start time
         self._pcm_sizes: dict[int, int] = {}  # ssrc -> total PCM bytes
+        self._tracks_info: list[dict[str, Any]] = []
 
     def _get_file(self, ssrc: int) -> io.BufferedRandom:
         if ssrc not in self._files:
@@ -84,9 +85,9 @@ class PerUserWaveSink(AudioSink):
         f.write(b'data')
         f.write(struct.pack('<I', data_size))
 
-    def cleanup(self) -> list[dict[str, Any]]:
-        """Finalize WAV files and return track info list."""
-        tracks = []
+    def cleanup(self):
+        """Finalize WAV files. Called by the library on stop_listening()."""
+        self._tracks_info = []
         for ssrc, f in self._files.items():
             data_size = self._pcm_sizes.get(ssrc, 0)
             self._write_wav_header(f, data_size)
@@ -96,7 +97,7 @@ class PerUserWaveSink(AudioSink):
             path = os.path.join(self.temp_dir, f"track_{ssrc}.wav")
             file_size = os.path.getsize(path) if os.path.exists(path) else 0
 
-            tracks.append({
+            self._tracks_info.append({
                 "ssrc": ssrc,
                 "user_discord_id": self._user_map.get(ssrc, 0),
                 "username": self._username_map.get(ssrc, f"unknown_{ssrc}"),
@@ -104,7 +105,6 @@ class PerUserWaveSink(AudioSink):
                 "file_size": file_size,
                 "duration": duration,
             })
-        return tracks
 
 
 class VoiceRecorder:
@@ -176,13 +176,14 @@ class VoiceRecorder:
 
         self._recording = False
         if self.vc:
-            self.vc.stop_listening()
+            self.vc.stop_listening()  # triggers sink.cleanup() in background thread
+            await asyncio.sleep(0.5)  # wait for cleanup thread
             await self.vc.disconnect()
 
-        # Finalize WAV files
+        # Read tracks info populated by sink.cleanup()
         tracks_info = []
-        if self.sink:
-            tracks_info = self.sink.cleanup()
+        if self.sink and hasattr(self.sink, '_tracks_info'):
+            tracks_info = self.sink._tracks_info
 
         duration = 0
         if self._start_time:
