@@ -60,6 +60,45 @@ async def on_ready():
     print(f'Мастер-бот {bot.user} запущен и готов к работе!')
     print(f'Воркеров: {len(bot.bot_manager.workers)}')
 
+    # Auto-join existing voice channels with people
+    await _auto_join_channels()
+
+
+async def _auto_join_channels():
+    """Find all voice channels with people and assign workers."""
+    await asyncio.sleep(3)  # Wait for workers to fully connect
+
+    channels_to_record = []
+    for guild in bot.guilds:
+        for channel in guild.voice_channels:
+            # Skip empty channels and AFK channels
+            if not channel.members:
+                continue
+            if guild.afk_channel and channel.id == guild.afk_channel.id:
+                continue
+            # Skip channels that only have bots
+            human_members = [m for m in channel.members if not m.bot]
+            if not human_members:
+                continue
+            channels_to_record.append(channel)
+
+    if not channels_to_record:
+        logging.info("No voice channels with people found on startup")
+        return
+
+    logging.info(f"Found {len(channels_to_record)} voice channels with people, assigning workers...")
+
+    assigned = 0
+    for channel in channels_to_record:
+        worker = await bot.bot_manager.assign_channel(channel)
+        if worker:
+            logging.info(f"Auto-joined: {channel.name} -> Worker {worker.worker_id}")
+            assigned += 1
+        else:
+            logging.warning(f"No free worker for: {channel.name}")
+
+    logging.info(f"Auto-join complete: {assigned}/{len(channels_to_record)} channels assigned")
+
 
 @bot.event
 async def on_close():
