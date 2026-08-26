@@ -1,232 +1,523 @@
+"""Voice recording cog — per-worker voice receive with per-user tracks."""
+
+from __future__ import annotations
+
 import asyncio
+import io
 import logging
+import os
+import struct
 import tempfile
+import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import discord
-from discord.ext import commands
-from discord.ext.voice_recv import VoiceRecvClient, WaveSink
+from discord.ext import commands, tasks
+from discord.ext.voice_recv import VoiceRecvClient
+
+from database import SessionLocal
+from models.voice_recording import VoiceRecording, VoiceRecordingParticipant, VoiceRecordingTrack
 
 logger = logging.getLogger(__name__)
 
+SAMPLE_RATE = 48000
+CHANNELS = 2
+SAMPLE_WIDTH = 2  # 16-bit
+
+
+class PerUserWaveSink:
+    """Sink that creates a separate WAV file per speaker (by SSRC/user)."""
+
+    def __init__(self, recording_id: int, temp_dir: str):
+        self.recording_id = recording_id
+        self.temp_dir = temp_dir
+        self._files: dict[int, io.BufferedRandom] = {}
+        self._wav_headers: dict[int, bool] = {}
+        self._user_map: dict[int, int] = {}  # ssrc -> user_discord_id
+        self._username_map: dict[int, str] = {}  # ssrc -> username
+        self._start_times: dict[int, float] = {}  # ssrc -> start time
+        self._pcm_sizes: dict[int, int] = {}  # ssrc -> total PCM bytes
+
+    def _get_file(self, ssrc: int) -> io.BufferedRandom:
+        if ssrc not in self._files:
+            path = os.path.join(self.temp_dir, f"track_{ssrc}.wav")
+            f = open(path, "w+b")
+            # Write placeholder WAV header (44 bytes)
+            f.write(b'\x00' * 44)
+            self._files[ssrc] = f
+            self._wav_headers[ssrc] = False
+            self._pcm_sizes[ssrc] = 0
+            self._start_times[ssrc] = time.time()
+        return self._files[ssrc]
+
+    def wants_opus(self) -> bool:
+        return False
+
+    def write(self, user: discord.Member | None, data: discord.AudioData):
+        if user is None:
+            return
+        ssrc = data.ssrc if hasattr(data, 'ssrc') else 0
+        if ssrc == 0:
+            return
+
+        if ssrc not in self._user_map and user:
+            self._user_map[ssrc] = user.id
+            self._username_map[ssrc] = user.display_name
+
+        f = self._get_file(ssrc)
+        pcm_bytes = data.pcm if hasattr(data, 'pcm') else bytes(data)
+        f.write(pcm_bytes)
+        self._pcm_sizes[ssrc] = self._pcm_sizes.get(ssrc, 0) + len(pcm_bytes)
+
+    def _write_wav_header(self, f: io.BufferedRandom, data_size: int):
+        f.seek(0)
+        f.write(b'RIFF')
+        f.write(struct.pack('<I', 36 + data_size))
+        f.write(b'WAVE')
+        f.write(b'fmt ')
+        f.write(struct.pack('<I', 16))
+        f.write(struct.pack('<H', 1))  # PCM
+        f.write(struct.pack('<H', CHANNELS))
+        f.write(struct.pack('<I', SAMPLE_RATE))
+        f.write(struct.pack('<I', SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH))
+        f.write(struct.pack('<H', CHANNELS * SAMPLE_WIDTH))
+        f.write(struct.pack('<H', SAMPLE_WIDTH * 8))
+        f.write(b'data')
+        f.write(struct.pack('<I', data_size))
+
+    def cleanup(self) -> list[dict[str, Any]]:
+        """Finalize WAV files and return track info list."""
+        tracks = []
+        for ssrc, f in self._files.items():
+            data_size = self._pcm_sizes.get(ssrc, 0)
+            self._write_wav_header(f, data_size)
+            f.close()
+
+            duration = int(time.time() - self._start_times.get(ssrc, time.time()))
+            path = os.path.join(self.temp_dir, f"track_{ssrc}.wav")
+            file_size = os.path.getsize(path) if os.path.exists(path) else 0
+
+            tracks.append({
+                "ssrc": ssrc,
+                "user_discord_id": self._user_map.get(ssrc, 0),
+                "username": self._username_map.get(ssrc, f"unknown_{ssrc}"),
+                "path": path,
+                "file_size": file_size,
+                "duration": duration,
+            })
+        return tracks
+
 
 class VoiceRecorder:
-    """Records audio from a Discord voice channel using discord-ext-voice-recv."""
+    """Per-worker voice recorder with per-user tracks."""
 
-    def __init__(self, channel: discord.VoiceChannel, output_path: Path):
-        self.channel = channel
-        self.output_path = output_path
+    def __init__(self, worker_id: int, bot: commands.Bot):
+        self.worker_id = worker_id
+        self.bot = bot
         self.vc: VoiceRecvClient | None = None
-        self.sink: WaveSink | None = None
-        self.started_at: datetime | None = None
-        self.participants: dict[int, dict[str, Any]] = {}
+        self.sink: PerUserWaveSink | None = None
         self._recording = False
+        self._channel_id: int | None = None
+        self._channel_name: str | None = None
+        self._start_time: datetime | None = None
+        self._db_recording_id: int | None = None
+        self._temp_dir: str | None = None
 
-    async def start(self) -> bool:
-        """Start recording. Returns True if successful."""
+    @property
+    def is_recording(self) -> bool:
+        return self._recording
+
+    async def start(self, channel_id: int, channel_name: str) -> dict[str, Any]:
+        """Connect to voice channel and start per-user recording."""
+        if self._recording:
+            return {"success": False, "error": "Already recording"}
+
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            return {"success": False, "error": f"Channel {channel_id} not found in bot cache"}
+
         try:
-            self.vc = await self.channel.connect(cls=VoiceRecvClient)
-            self.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
-            self._recording = True
-
-            self.sink = WaveSink(str(self.output_path))
-            self.vc.listen(self.sink)
-
-            logger.info(f"Started recording in {self.channel.name} ({self.channel.id})")
-            return True
-
+            self.vc = await channel.connect(cls=VoiceRecvClient)
         except Exception as e:
-            logger.error(f"Failed to start recording in {self.channel.name}: {e}")
-            await self.stop()
-            return False
+            logger.error(f"Worker {self.worker_id} failed to connect: {e}")
+            return {"success": False, "error": str(e)}
+
+        self._channel_id = channel_id
+        self._channel_name = channel_name
+        self._start_time = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # Create temp dir for this recording
+        self._temp_dir = tempfile.mkdtemp(prefix=f"rec_{self.worker_id}_")
+
+        # Create DB record
+        with SessionLocal() as db:
+            recording = VoiceRecording(
+                channel_id=channel_id,
+                channel_name=channel_name,
+                worker_bot_id=self.worker_id,
+                started_at=self._start_time,
+                status="recording",
+            )
+            db.add(recording)
+            db.commit()
+            db.refresh(recording)
+            self._db_recording_id = recording.id
+
+        self.sink = PerUserWaveSink(self._db_recording_id, self._temp_dir)
+        self.vc.listen(self.sink)
+        self._recording = True
+
+        logger.info(f"Started recording in {channel_name} ({channel_id})")
+        return {"success": True, "channel_name": channel_name, "recording_id": self._db_recording_id}
 
     async def stop(self) -> dict[str, Any] | None:
-        """Stop recording and return metadata."""
+        """Stop recording, upload per-user tracks to S3."""
         if not self._recording:
             return None
 
         self._recording = False
-        ended_at = datetime.now(timezone.utc).replace(tzinfo=None)
-
         if self.vc:
             self.vc.stop_listening()
             await self.vc.disconnect()
 
+        # Finalize WAV files
+        tracks_info = []
         if self.sink:
-            self.sink.cleanup()
+            tracks_info = self.sink.cleanup()
 
-        duration_seconds = None
-        if self.started_at:
-            duration_seconds = int((ended_at - self.started_at).total_seconds())
+        duration = 0
+        if self._start_time:
+            duration = int((datetime.now(timezone.utc).replace(tzinfo=None) - self._start_time).total_seconds())
 
-        for user_id, info in self.participants.items():
-            if info["left_at"] is None:
-                info["left_at"] = ended_at
-            if info["joined_at"]:
-                info["duration_seconds"] = int(
-                    (info["left_at"] - info["joined_at"]).total_seconds()
+        # Upload each track to S3 and save to DB
+        from s3_client import S3Client
+        s3 = S3Client()
+        total_size = 0
+
+        with SessionLocal() as db:
+            for track in tracks_info:
+                s3_key = f"recordings/{self._db_recording_id}/user_{track['user_discord_id']}_{track['username']}.wav"
+                upload_ok = s3.upload_file(track["path"], s3_key)
+                file_size = track["file_size"] if upload_ok else 0
+                total_size += file_size
+
+                db_track = VoiceRecordingTrack(
+                    recording_id=self._db_recording_id,
+                    user_discord_id=track["user_discord_id"],
+                    username=track["username"],
+                    s3_key=s3_key if upload_ok else "",
+                    file_size_bytes=file_size,
+                    duration_seconds=track["duration"],
                 )
+                db.add(db_track)
 
-        metadata = {
-            "channel_id": self.channel.id,
-            "channel_name": self.channel.name,
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "ended_at": ended_at.isoformat(),
-            "duration_seconds": duration_seconds,
-            "participants": [
-                {
-                    "discord_id": uid,
-                    "username": info["username"],
-                    "joined_at": info["joined_at"].isoformat() if info["joined_at"] else None,
-                    "left_at": info["left_at"].isoformat() if info["left_at"] else None,
-                    "duration_seconds": info.get("duration_seconds"),
-                }
-                for uid, info in self.participants.items()
-            ],
-            "file_size_bytes": self.output_path.stat().st_size if self.output_path.exists() else 0,
+            # Update main recording
+            recording = db.get(VoiceRecording, self._db_recording_id)
+            if recording:
+                recording.ended_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                recording.duration_seconds = duration
+                recording.status = "completed"
+                recording.file_size_bytes = total_size
+                if tracks_info:
+                    recording.s3_key = f"recordings/{self._db_recording_id}/"
+
+            db.commit()
+
+        # Cleanup temp files
+        if self._temp_dir:
+            for track in tracks_info:
+                try:
+                    os.remove(track["path"])
+                except OSError:
+                    pass
+            try:
+                os.rmdir(self._temp_dir)
+            except OSError:
+                pass
+
+        result = {
+            "channel_name": self._channel_name,
+            "duration": duration,
+            "tracks_count": len(tracks_info),
+            "total_size": total_size,
         }
 
-        logger.info(
-            f"Stopped recording in {self.channel.name}. "
-            f"Duration: {duration_seconds}s, Size: {metadata['file_size_bytes']} bytes"
-        )
+        self.sink = None
+        self.vc = None
+        self._channel_id = None
+        self._channel_name = None
+        self._start_time = None
+        self._db_recording_id = None
+        self._temp_dir = None
 
-        return metadata
-
-    def add_participant(self, user: discord.Member):
-        if user.id not in self.participants:
-            self.participants[user.id] = {
-                "username": user.name,
-                "joined_at": datetime.now(timezone.utc).replace(tzinfo=None),
-                "left_at": None,
-                "duration_seconds": None,
-            }
-        elif self.participants[user.id]["left_at"] is not None:
-            self.participants[user.id]["joined_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
-            self.participants[user.id]["left_at"] = None
-
-    def remove_participant(self, user: discord.Member):
-        if user.id in self.participants and self.participants[user.id]["left_at"] is None:
-            self.participants[user.id]["left_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
-            if self.participants[user.id]["joined_at"]:
-                self.participants[user.id]["duration_seconds"] = int(
-                    (self.participants[user.id]["left_at"] - self.participants[user.id]["joined_at"]).total_seconds()
-                )
+        logger.info(f"Stopped recording: {len(tracks_info)} tracks, {duration}s")
+        return result
 
 
 class WorkerBot:
-    """A single bot instance that can record one voice channel."""
+    """Wrapper around a single worker Discord bot."""
 
-    def __init__(self, token: str, worker_id: int):
-        self.token = token
+    def __init__(self, worker_id: int, token: str):
         self.worker_id = worker_id
+        self.token = token
         self.bot: commands.Bot | None = None
         self.recorder: VoiceRecorder | None = None
         self.is_busy = False
-        self.current_channel_id: int | None = None
+        self._channel_id: int | None = None
+        self._channel_name: str | None = None
         self._ready = asyncio.Event()
 
     async def start(self):
-        """Start the worker bot."""
         intents = discord.Intents.default()
         intents.voice_states = True
         intents.members = True
+        intents.message_content = False
 
-        self.bot = commands.Bot(command_prefix=f"!worker{self.worker_id}_", intents=intents)
+        self.bot = commands.Bot(command_prefix="!", intents=intents)
+        self.recorder = VoiceRecorder(self.worker_id, self.bot)
 
         @self.bot.event
         async def on_ready():
             logger.info(f"Worker {self.worker_id} ({self.bot.user}) is ready")
             self._ready.set()
 
-        @self.bot.event
-        async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-            if not self.recorder or not self.current_channel_id:
-                return
-            if after.channel and after.channel.id == self.current_channel_id:
-                self.recorder.add_participant(member)
-            if before.channel and before.channel.id == self.current_channel_id:
-                self.recorder.remove_participant(member)
-
         asyncio.create_task(self.bot.start(self.token))
-        await asyncio.wait_for(self._ready.wait(), timeout=30)
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            logger.error(f"Worker {self.worker_id} failed to start within 30s")
 
-    async def stop(self):
-        if self.recorder:
-            await self.recorder.stop()
-        if self.bot:
-            await self.bot.close()
-
-    def _find_channel(self, channel_id: int) -> discord.VoiceChannel | None:
-        """Find a voice channel in the worker bot's own guild cache."""
-        for guild in self.bot.guilds:
-            channel = guild.get_channel(channel_id)
-            if isinstance(channel, discord.VoiceChannel):
-                return channel
-        return None
-
-    async def start_recording(self, channel_id: int, channel_name: str) -> bool:
-        """Start recording a voice channel by ID."""
-        if self.is_busy:
-            logger.warning(f"Worker {self.worker_id} is already busy")
-            return False
-
-        # Find channel in THIS worker's guild cache
-        channel = self._find_channel(channel_id)
-        if not channel:
-            logger.error(f"Worker {self.worker_id}: channel {channel_id} not found in guild cache")
-            return False
-
-        self.is_busy = True
-        self.current_channel_id = channel_id
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"worker-{self.worker_id}_{channel_name}_{timestamp}.wav"
-        output_path = Path(tempfile.gettempdir()) / "shelter_recordings" / filename
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        self.recorder = VoiceRecorder(channel, output_path)
-        success = await self.recorder.start()
-
-        if not success:
-            self.is_busy = False
-            self.current_channel_id = None
-            self.recorder = None
-            return False
-
-        return True
+    async def start_recording(self, channel_id: int, channel_name: str) -> dict[str, Any]:
+        if not self.recorder:
+            return {"success": False, "error": "Worker not initialized"}
+        result = await self.recorder.start(channel_id, channel_name)
+        if result.get("success"):
+            self.is_busy = True
+            self._channel_id = channel_id
+            self._channel_name = channel_name
+        return result
 
     async def stop_recording(self) -> dict[str, Any] | None:
         if not self.recorder:
             return None
-
-        metadata = await self.recorder.stop()
+        result = await self.recorder.stop()
         self.is_busy = False
-        self.current_channel_id = None
-        self.recorder = None
+        self._channel_id = None
+        self._channel_name = None
+        return result
 
-        return metadata
+    async def stop(self):
+        if self.recorder and self.recorder.is_recording:
+            await self.recorder.stop()
+        if self.bot:
+            await self.bot.close()
 
-    def get_status(self) -> dict[str, Any]:
-        channel_name = None
-        if self.current_channel_id and self.bot:
-            ch = self._find_channel(self.current_channel_id)
-            if ch:
-                channel_name = ch.name
 
-        status = {
-            "worker_id": self.worker_id,
-            "is_busy": self.is_busy,
-            "current_channel": channel_name,
-            "bot_user": str(self.bot.user) if self.bot and self.bot.user else None,
-            "is_connected": self.bot.is_ready() if self.bot else False,
+class BotManager:
+    """Manages worker bots for voice recording."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.workers: list[WorkerBot] = []
+        self.active_recordings: dict[int, WorkerBot] = {}  # channel_id -> worker
+        self.queue: list[dict[str, Any]] = []
+        self._initialized = False
+
+    async def initialize(self, worker_tokens: list[str]):
+        for i, token in enumerate(worker_tokens, 1):
+            worker = WorkerBot(i, token)
+            await worker.start()
+            self.workers.append(worker)
+            logger.info(f"Worker {i} started successfully")
+
+        self._process_queue.start()
+        self._initialized = True
+        logger.info(f"BotManager initialized with {len(self.workers)} workers")
+
+    async def assign_channel(self, channel_id: int, channel_name: str) -> WorkerBot | None:
+        if channel_id in self.active_recordings:
+            return self.active_recordings[channel_id]
+
+        free_worker = None
+        for w in self.workers:
+            if not w.is_busy:
+                free_worker = w
+                break
+
+        if not free_worker:
+            self.queue.append({
+                "channel_id": channel_id,
+                "channel_name": channel_name,
+                "queued_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                "expires_at": datetime.now(timezone.utc).replace(tzinfo=None),
+            })
+            logger.info(f"No free workers, queued {channel_name}")
+            return None
+
+        result = await free_worker.start_recording(channel_id, channel_name)
+        if result.get("success"):
+            self.active_recordings[channel_id] = free_worker
+            logger.info(f"Assigned channel {channel_name} ({channel_id}) to worker {free_worker.worker_id}")
+            return free_worker
+        else:
+            logger.error(f"Failed to start recording: {result.get('error')}")
+            return None
+
+    async def release_worker(self, worker: WorkerBot) -> dict[str, Any] | None:
+        result = await worker.stop_recording()
+        if worker._channel_id is None:
+            for cid, w in list(self.active_recordings.items()):
+                if w.worker_id == worker.worker_id:
+                    del self.active_recordings[cid]
+                    break
+        else:
+            self.active_recordings.pop(worker._channel_id, None)
+        return result
+
+    def get_worker_by_channel(self, channel_id: int) -> WorkerBot | None:
+        return self.active_recordings.get(channel_id)
+
+    def get_all_status(self) -> dict[str, Any]:
+        workers_status = []
+        for w in self.workers:
+            status = {
+                "worker_id": w.worker_id,
+                "is_busy": w.is_busy,
+                "channel_name": w._channel_name,
+                "channel_id": w._channel_id,
+                "is_recording": w.recorder.is_recording if w.recorder else False,
+            }
+            if w.recorder and w.recorder._start_time:
+                elapsed = (datetime.now(timezone.utc).replace(tzinfo=None) - w.recorder._start_time).total_seconds()
+                status["elapsed_seconds"] = int(elapsed)
+            workers_status.append(status)
+
+        return {
+            "workers": workers_status,
+            "queue_size": len(self.queue),
+            "active_count": len(self.active_recordings),
         }
 
-        if self.recorder and self.recorder.started_at:
-            duration = (datetime.now(timezone.utc).replace(tzinfo=None) - self.recorder.started_at).total_seconds()
-            status["recording_duration_seconds"] = int(duration)
-            status["participants_count"] = len(self.recorder.participants)
+    @tasks.loop(seconds=30)
+    async def _process_queue(self):
+        if not self.queue:
+            return
 
-        return status
+        free_workers = [w for w in self.workers if not w.is_busy]
+        if not free_workers:
+            return
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        self.queue = [q for q in self.queue if (now - q["queued_at"]).total_seconds() < 1800]
+
+        for queued in self.queue[:]:
+            if not free_workers:
+                break
+            worker = free_workers.pop(0)
+            result = await worker.start_recording(queued["channel_id"], queued["channel_name"])
+            if result.get("success"):
+                self.active_recordings[queued["channel_id"]] = worker
+                self.queue.remove(queued)
+                logger.info(f"Queue: assigned {queued['channel_name']} to worker {worker.worker_id}")
+
+    async def shutdown(self):
+        self._process_queue.stop()
+        for w in self.workers:
+            await w.stop()
+        logger.info("BotManager shutdown complete")
+
+
+class VoiceRecordingCog(commands.Cog):
+    """Voice recording management commands."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    @property
+    def bot_manager(self) -> BotManager | None:
+        return getattr(self.bot, 'bot_manager', None)
+
+    @discord.slash_command(name="record", description="Voice recording management")
+    @commands.has_permissions(administrator=True)
+    async def record(self, ctx: discord.ApplicationContext):
+        pass
+
+    @record.command(name="start", description="Start recording in a voice channel")
+    async def start(self, ctx: discord.ApplicationContext, channel: discord.VoiceChannel):
+        if not self.bot_manager:
+            await ctx.respond("BotManager not initialized", ephemeral=True)
+            return
+
+        await ctx.defer(ephemeral=True)
+
+        worker = await self.bot_manager.assign_channel(channel.id, channel.name)
+        if worker:
+            await ctx.respond(f"Recording started in {channel.name} (Worker {worker.worker_id})", ephemeral=True)
+        else:
+            await ctx.respond(f"No free workers. Channel queued.", ephemeral=True)
+
+    @record.command(name="stop", description="Stop recording in a voice channel")
+    async def stop(self, ctx: discord.ApplicationContext, channel: discord.VoiceChannel):
+        if not self.bot_manager:
+            await ctx.respond("BotManager not initialized", ephemeral=True)
+            return
+
+        worker = self.bot_manager.get_worker_by_channel(channel.id)
+        if not worker:
+            await ctx.respond(f"No active recording in {channel.name}", ephemeral=True)
+            return
+
+        await ctx.defer(ephemeral=True)
+        result = await self.bot_manager.release_worker(worker)
+        if result:
+            await ctx.respond(
+                f"Stopped recording in {channel.name}\n"
+                f"Duration: {result['duration']}s\n"
+                f"Tracks: {result['tracks_count']}\n"
+                f"Size: {result['total_size'] / 1024:.1f} KB",
+                ephemeral=True
+            )
+        else:
+            await ctx.respond("Error stopping recording", ephemeral=True)
+
+    @record.command(name="status", description="Show recording status")
+    async def status(self, ctx: discord.ApplicationContext):
+        if not self.bot_manager:
+            await ctx.respond("BotManager not initialized", ephemeral=True)
+            return
+
+        status = self.bot_manager.get_all_status()
+        lines = ["**Recording Status**\n"]
+
+        for w in status["workers"]:
+            if w["is_busy"]:
+                elapsed = w.get("elapsed_seconds", 0)
+                m, s = divmod(elapsed, 60)
+                lines.append(f"Worker {w['worker_id']}: recording {w['channel_name']} ({m:02d}:{s:02d})")
+            else:
+                lines.append(f"Worker {w['worker_id']}: idle")
+
+        lines.append(f"\nQueue: {status['queue_size']} channels waiting")
+        await ctx.respond("\n".join(lines), ephemeral=True)
+
+    @record.command(name="list", description="List recent recordings")
+    async def list_recordings(self, ctx: discord.ApplicationContext):
+        with SessionLocal() as db:
+            recordings = db.query(VoiceRecording).order_by(VoiceRecording.created_at.desc()).limit(10).all()
+            if not recordings:
+                await ctx.respond("No recordings found", ephemeral=True)
+                return
+
+            lines = ["**Recent Recordings**\n"]
+            for r in recordings:
+                dur = r.duration_seconds or 0
+                m, s = divmod(dur, 60)
+                size = (r.file_size_bytes or 0) / 1024
+                lines.append(f"#{r.id} | {r.channel_name} | {m:02d}:{s:02d} | {size:.1f} KB | {r.status}")
+
+            await ctx.respond("\n".join(lines), ephemeral=True)
+
+
+def setup(bot: commands.Bot):
+    bot.add_cog(VoiceRecordingCog(bot))

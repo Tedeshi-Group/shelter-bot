@@ -108,6 +108,57 @@ async def _auto_join_channels():
 
 
 @bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    """Auto-assign workers when someone joins a voice channel."""
+    if member.bot:
+        return
+    if not hasattr(bot, 'bot_manager'):
+        return
+
+    # Someone joined a voice channel (was not in voice, now is)
+    if after.channel and not before.channel:
+        channel = after.channel
+        guild = channel.guild
+
+        # Skip AFK channel
+        if guild.afk_channel and channel.id == guild.afk_channel.id:
+            return
+
+        # Check if there are human members
+        human_members = [m for m in channel.members if not m.bot]
+        if not human_members:
+            return
+
+        # Check if already being recorded
+        existing = bot.bot_manager.get_worker_by_channel(channel.id)
+        if existing:
+            return
+
+        # Check if there's a free worker
+        free_workers = [w for w in bot.bot_manager.workers if not w.is_busy]
+        if not free_workers:
+            logging.info(f"New voice activity in {channel.name} but all workers busy, queuing")
+            await bot.bot_manager.assign_channel(channel.id, channel.name)
+            return
+
+        logging.info(f"New voice activity in {channel.name}, assigning worker")
+        worker = await bot.bot_manager.assign_channel(channel.id, channel.name)
+        if worker:
+            logging.info(f"Auto-joined: {channel.name} -> Worker {worker.worker_id}")
+
+    # Someone left a voice channel - check if channel is now empty (only bots)
+    if before.channel and not after.channel:
+        channel = before.channel
+        human_members = [m for m in channel.members if not m.bot]
+        if not human_members:
+            # Channel is empty, stop recording if active
+            worker = bot.bot_manager.get_worker_by_channel(channel.id)
+            if worker:
+                logging.info(f"Channel {channel.name} is empty, stopping recording")
+                await bot.bot_manager.release_worker(worker)
+
+
+@bot.event
 async def on_close():
     """Cleanup on bot shutdown."""
     if hasattr(bot, 'bot_manager') and bot.bot_manager:
