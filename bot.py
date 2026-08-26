@@ -1,5 +1,7 @@
 import logging
 import os
+import subprocess
+import sys
 import traceback
 from datetime import datetime, timezone
 
@@ -14,6 +16,22 @@ from database import AsyncSessionLocal
 from models import User, VoiceSession, Achievement, AchievementLevel, UserAchievement
 
 load_dotenv()
+
+
+def run_migrations():
+    """Apply pending database migrations on startup."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            if result.stdout.strip():
+                logging.info("Alembic migrations applied: %s", result.stdout.strip())
+        else:
+            logging.error("Alembic migration failed: %s", result.stderr)
+    except Exception:
+        logging.error("Failed to run migrations:\n%s", traceback.format_exc())
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +53,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 @bot.event
 async def setup_hook():
     """Load cogs before on_ready fires."""
+    run_migrations()
     for ext in ["cogs.voice_channels", "cogs.moderation", "cogs.dota_tokens"]:
         try:
             await bot.load_extension(ext)
