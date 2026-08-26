@@ -11,6 +11,7 @@ from models import MessageCounter, User, VoiceSession
 
 VOICE_CATEGORY_ID = 1517577490368041200
 ARCHIVE_CHANNEL_ID = 1429769594037600267
+LOG_CHANNEL_ID = 1517446069192102003
 VOICE_CHANNEL_PREFIX = "голосовой #"
 NEW_VOICE_NAME = "новый войс"
 EMPTY_TIMEOUT_SECONDS = 10
@@ -362,10 +363,10 @@ class VoiceChannels(commands.Cog):
         if not hasattr(self, '_voice_threads'):
             self._voice_threads = {}
 
-        archive_channel = self.bot.get_channel(ARCHIVE_CHANNEL_ID)
-        if archive_channel:
+        log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
             try:
-                thread = await archive_channel.create_thread(
+                thread = await log_channel.create_thread(
                     name=new_name,
                     type=discord.ChannelType.private_thread,
                 )
@@ -397,11 +398,11 @@ class VoiceChannels(commands.Cog):
         if not hasattr(self, '_voice_threads') or channel.id not in self._voice_threads:
             return
 
-        archive_channel = self.bot.get_channel(ARCHIVE_CHANNEL_ID)
-        if not archive_channel:
+        log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
+        if not log_channel:
             return
 
-        thread = archive_channel.get_thread(self._voice_threads[channel.id])
+        thread = log_channel.get_thread(self._voice_threads[channel.id])
         if not thread:
             return
 

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import discord
 from discord.ext import commands
 
-ARCHIVE_CHANNEL_ID = 1429769594037600267
+LOG_CHANNEL_ID = 1517446069192102003
 DELETED_THREAD_NAME = "Удалённые"
 EDITED_THREAD_NAME = "Изменённые"
 
@@ -21,7 +21,7 @@ class Moderation(commands.Cog):
         await self._get_or_create_thread(EDITED_THREAD_NAME, "_edited_thread_id")
 
     async def _get_or_create_thread(self, name: str, attr_name: str) -> discord.Thread | None:
-        archive_channel = self.bot.get_channel(ARCHIVE_CHANNEL_ID)
+        archive_channel = self.bot.get_channel(LOG_CHANNEL_ID)
         if not archive_channel:
             return None
 
@@ -186,7 +186,7 @@ class Moderation(commands.Cog):
         if not thread_id:
             return
 
-        archive_channel = self.bot.get_channel(ARCHIVE_CHANNEL_ID)
+        archive_channel = self.bot.get_channel(LOG_CHANNEL_ID)
         if not archive_channel:
             return
 
