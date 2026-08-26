@@ -554,9 +554,9 @@ class TokenConfirmView(discord.ui.View):
 
         if all_confirmed:
             if interaction.message.thread:
-                await interaction.message.thread.send("Все жетоны подтверждены. Тред будет удалён.")
+                await interaction.message.thread.send("Все жетоны подтверждены. Тред будет архивирован.")
                 await asyncio.sleep(3)
-                await interaction.message.thread.delete()
+                await interaction.message.thread.edit(archived=True)
 
     async def dispute_button(self, interaction: discord.Interaction):
         async with AsyncSessionLocal() as db:
@@ -664,10 +664,10 @@ class ThreadCloseView(discord.ui.View):
                 except (discord.NotFound, discord.HTTPException):
                     pass
 
-        await interaction.response.send_message("Сделка закрыта. Тред будет удалён через 5 секунд.")
+        await interaction.response.send_message("Сделка закрыта. Тред будет архивирован через 5 секунд.")
         await asyncio.sleep(5)
         try:
-            await interaction.channel.delete()
+            await interaction.channel.edit(archived=True)
         except discord.HTTPException:
             pass
 
@@ -807,7 +807,7 @@ class DealActionView(discord.ui.View):
             thread = interaction.guild.get_thread(thread_id)
             if thread:
                 try:
-                    await thread.delete()
+                    await thread.edit(archived=True)
                 except discord.HTTPException:
                     pass
 
@@ -1132,7 +1132,7 @@ class DotaTokens(commands.Cog):
             thread = interaction.guild.get_thread(request.thread_id)
             if thread:
                 try:
-                    await thread.delete()
+                    await thread.edit(archived=True)
                 except discord.HTTPException:
                     pass
 
@@ -1306,7 +1306,7 @@ class DotaTokens(commands.Cog):
                         thread = guild.get_thread(request.thread_id)
                         if thread:
                             try:
-                                await thread.delete()
+                                await thread.edit(archived=True)
                             except discord.HTTPException:
                                 pass
 
