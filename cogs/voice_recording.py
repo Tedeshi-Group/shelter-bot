@@ -268,6 +268,10 @@ class WorkerBot:
         self._channel_name: str | None = None
         self._ready = asyncio.Event()
 
+    @property
+    def current_channel_id(self) -> int | None:
+        return self._channel_id
+
     async def start(self):
         intents = discord.Intents.default()
         intents.voice_states = True
