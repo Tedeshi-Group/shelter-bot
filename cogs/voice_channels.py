@@ -234,22 +234,24 @@ class VoiceChannels(commands.Cog):
                     "voice_lone_wolf",
                 ])
 
-        # --- Deaf state management ---
-        if before.channel and before.channel.category_id == VOICE_CATEGORY_ID:
-            ch_id = before.channel.id
-            if ch_id in self.deaf_states and member.id in self.deaf_states[ch_id]:
-                try:
-                    await member.edit(deafen=False)
-                except (discord.HTTPException, discord.Forbidden):
-                    pass
+        # --- Deaf state management (only on channel change, not on deaf toggle) ---
+        channel_changed = before.channel != after.channel
+        if channel_changed:
+            if before.channel and before.channel.category_id == VOICE_CATEGORY_ID:
+                ch_id = before.channel.id
+                if ch_id in self.deaf_states and member.id in self.deaf_states[ch_id]:
+                    try:
+                        await member.edit(deafen=False)
+                    except (discord.HTTPException, discord.Forbidden):
+                        pass
 
-        if after.channel and after.channel.category_id == VOICE_CATEGORY_ID:
-            ch_id = after.channel.id
-            if ch_id in self.deaf_states and member.id in self.deaf_states[ch_id]:
-                try:
-                    await member.edit(deafen=True)
-                except (discord.HTTPException, discord.Forbidden):
-                    pass
+            if after.channel and after.channel.category_id == VOICE_CATEGORY_ID:
+                ch_id = after.channel.id
+                if ch_id in self.deaf_states and member.id in self.deaf_states[ch_id]:
+                    try:
+                        await member.edit(deafen=True)
+                    except (discord.HTTPException, discord.Forbidden):
+                        pass
 
         # --- Temporary voice channel management ---
         if before.channel and before.channel.category_id == VOICE_CATEGORY_ID:
