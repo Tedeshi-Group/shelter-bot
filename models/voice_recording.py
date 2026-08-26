@@ -51,6 +51,30 @@ class VoiceRecordingParticipant(Base):
     recording: Mapped[VoiceRecording] = relationship(back_populates="participants")
 
 
+class VoiceRecordingTrack(Base):
+    __tablename__ = "voice_recording_tracks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recording_id: Mapped[int] = mapped_column(ForeignKey("voice_recordings.id"))
+    user_discord_id: Mapped[int] = mapped_column(BigInteger)
+    username: Mapped[str] = mapped_column(String(255))
+    s3_key: Mapped[str] = mapped_column(String(512))
+    file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+
+    recording: Mapped[VoiceRecording] = relationship(
+        back_populates="tracks"
+    )
+
+
+VoiceRecording.tracks = relationship(
+    "VoiceRecordingTrack", back_populates="recording", cascade="all, delete-orphan"
+)
+
+
 class VoiceRecordingQueue(Base):
     __tablename__ = "voice_recording_queue"
 

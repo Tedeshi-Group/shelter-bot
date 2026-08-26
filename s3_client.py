@@ -48,6 +48,23 @@ class S3Client:
         """Generate S3 key for metadata JSON."""
         return s3_key.replace(".ogg", "_meta.json")
 
+    def upload_file(self, local_path: str, s3_key: str, content_type: str = "audio/wav") -> bool:
+        """Upload a local file to S3. Returns True on success."""
+        if not os.path.exists(local_path):
+            logger.error(f"File not found: {local_path}")
+            return False
+        try:
+            client = self._get_client()
+            client.upload_file(
+                local_path, self.bucket, s3_key,
+                ExtraArgs={"ContentType": content_type},
+            )
+            logger.info(f"Uploaded to s3://{self.bucket}/{s3_key}")
+            return True
+        except (ClientError, NoCredentialsError) as e:
+            logger.error(f"Upload failed for {s3_key}: {e}")
+            return False
+
     async def upload_recording(
         self,
         audio_path: Path,
