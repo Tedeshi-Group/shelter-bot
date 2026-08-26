@@ -21,12 +21,14 @@ logger = logging.getLogger(__name__)
 class RecordingCommands(commands.Cog):
     """Voice recording management commands."""
 
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: commands.Bot, bot_manager=None, s3_client=None):
         self.bot = bot
+        self._bot_manager = bot_manager
+        self._s3_client = s3_client
 
     @property
     def bot_manager(self) -> "BotManager | None":
-        return getattr(self.bot, 'bot_manager', None)
+        return self._bot_manager or getattr(self.bot, 'bot_manager', None)
 
     @app_commands.command(name="record_start", description="Start recording in a voice channel")
     @app_commands.describe(channel="Voice channel to record")
