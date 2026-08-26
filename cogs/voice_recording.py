@@ -258,7 +258,7 @@ class VoiceRecorder:
 class WorkerBot:
     """Wrapper around a single worker Discord bot."""
 
-    def __init__(self, worker_id: int, token: str):
+    def __init__(self, token: str, worker_id: int = 1):
         self.worker_id = worker_id
         self.token = token
         self.bot: commands.Bot | None = None
