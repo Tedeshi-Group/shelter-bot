@@ -27,7 +27,7 @@ class RecordingCommands(commands.Cog):
     def bot_manager(self) -> "BotManager | None":
         return getattr(self.bot, 'bot_manager', None)
 
-    @discord.slash_command(name="record", description="Voice recording management")
+    @commands.slash_command(name="record", description="Voice recording management")
     @commands.has_permissions(administrator=True)
     async def record(self, ctx: discord.ApplicationContext):
         pass
