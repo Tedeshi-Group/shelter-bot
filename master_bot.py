@@ -17,6 +17,13 @@ from s3_client import S3Client
 
 load_dotenv()
 
+# Load opus for voice receive (WaveSink needs it to decode audio)
+if not discord.opus.is_loaded():
+    try:
+        discord.opus.load_opus('libopus.so.0')
+    except Exception:
+        discord.opus.load_opus('libopus.so')
+
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] [%(levelname)-8s] %(name)s: %(message)s',

@@ -17,6 +17,7 @@ jobs:
           script: |
             cd ${{ secrets.VPS_PATH }}
             git pull origin production
+            sudo apt-get install -y libopus0
             source .venv/bin/activate
             pip install --upgrade pip
             pip install -r requirements.txt --no-cache-dir
