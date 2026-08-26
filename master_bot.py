@@ -90,7 +90,7 @@ async def _auto_join_channels():
 
     assigned = 0
     for channel in channels_to_record:
-        worker = await bot.bot_manager.assign_channel(channel)
+        worker = await bot.bot_manager.assign_channel(channel.id, channel.name)
         if worker:
             logging.info(f"Auto-joined: {channel.name} -> Worker {worker.worker_id}")
             assigned += 1

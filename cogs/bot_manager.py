@@ -4,7 +4,6 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import discord
 from sqlalchemy import select
 
 from database import AsyncSessionLocal
@@ -19,7 +18,7 @@ class BotManager:
 
     def __init__(self, max_workers: int = 5, max_queue_size: int = 10):
         self.workers: list[WorkerBot] = []
-        self.queue: asyncio.Queue[VoiceChannel] = asyncio.Queue(maxsize=max_queue_size)
+        self.queue: asyncio.Queue[tuple[int, str]] = asyncio.Queue(maxsize=max_queue_size)
         self.current_index: int = 0
         self.max_workers = max_workers
         self.max_queue_size = max_queue_size
@@ -30,7 +29,6 @@ class BotManager:
         if self._initialized:
             return
 
-        # Load worker tokens from environment
         tokens = []
         for i in range(1, self.max_workers + 1):
             token = os.getenv(f"VOICE_WORKER_TOKEN_{i}")
@@ -41,7 +39,6 @@ class BotManager:
             logger.warning("No worker tokens found in environment")
             return
 
-        # Create and start worker bots
         for i, token in enumerate(tokens, 1):
             worker = WorkerBot(token, worker_id=i)
             try:
@@ -64,81 +61,70 @@ class BotManager:
         self.workers.clear()
         self._initialized = False
 
-    async def assign_channel(self, channel: discord.VoiceChannel) -> WorkerBot | None:
+    async def assign_channel(self, channel_id: int, channel_name: str) -> WorkerBot | None:
         """
         Assign a voice channel to a free worker using round-robin.
         Returns the assigned worker or None if all are busy (channel queued).
         """
-        # Find free workers
         free_workers = [w for w in self.workers if not w.is_busy]
 
         if free_workers:
-            # Round-robin selection
             worker = free_workers[self.current_index % len(free_workers)]
             self.current_index += 1
 
-            # Start recording
-            success = await worker.start_recording(channel)
+            success = await worker.start_recording(channel_id, channel_name)
             if success:
-                logger.info(f"Assigned channel {channel.name} to worker {worker.worker_id}")
+                logger.info(f"Assigned channel {channel_name} ({channel_id}) to worker {worker.worker_id}")
                 return worker
             else:
                 logger.error(f"Failed to start recording on worker {worker.worker_id}")
-                # Try next worker
-                return await self._try_next_worker(channel, free_workers)
+                return await self._try_next_worker(channel_id, channel_name, free_workers)
 
-        # All workers busy - add to queue
-        logger.info(f"All workers busy, queuing channel {channel.name}")
-        await self._add_to_queue(channel)
+        logger.info(f"All workers busy, queuing channel {channel_name}")
+        await self._add_to_queue(channel_id, channel_name)
         return None
 
     async def _try_next_worker(
-        self, channel: discord.VoiceChannel, free_workers: list[WorkerBot]
+        self, channel_id: int, channel_name: str, free_workers: list[WorkerBot]
     ) -> WorkerBot | None:
         """Try remaining free workers after a failure."""
         for worker in free_workers:
             if worker.is_busy:
                 continue
-            success = await worker.start_recording(channel)
+            success = await worker.start_recording(channel_id, channel_name)
             if success:
-                logger.info(f"Assigned channel {channel.name} to worker {worker.worker_id} (retry)")
+                logger.info(f"Assigned channel {channel_name} to worker {worker.worker_id} (retry)")
                 return worker
         return None
 
     async def release_worker(self, worker: WorkerBot) -> dict[str, Any] | None:
-        """
-        Release a worker and return recording metadata.
-        Also processes the queue to assign next waiting channel.
-        """
+        """Release a worker and return recording metadata."""
         metadata = await worker.stop_recording()
 
         if metadata:
-            # Save to database
             await self._save_recording(worker.worker_id, metadata)
 
-        # Process queue
         await self._process_queue()
 
         return metadata
 
-    async def _add_to_queue(self, channel: discord.VoiceChannel):
+    async def _add_to_queue(self, channel_id: int, channel_name: str):
         """Add a channel to the recording queue."""
         try:
             async with AsyncSessionLocal() as db:
                 expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=30)
                 queue_entry = VoiceRecordingQueue(
-                    channel_id=channel.id,
-                    channel_name=channel.name,
+                    channel_id=channel_id,
+                    channel_name=channel_name,
                     expires_at=expires_at,
                 )
                 db.add(queue_entry)
                 await db.commit()
 
-            # Also add to in-memory queue
             try:
-                self.queue.put_nowait(channel)
+                self.queue.put_nowait((channel_id, channel_name))
             except asyncio.QueueFull:
-                logger.warning(f"Queue is full, dropping channel {channel.name}")
+                logger.warning(f"Queue is full, dropping channel {channel_name}")
 
         except Exception as e:
             logger.error(f"Failed to add channel to queue: {e}")
@@ -146,7 +132,6 @@ class BotManager:
     async def _process_queue(self):
         """Process the queue and assign waiting channels to free workers."""
         while not self.queue.empty():
-            # Find free worker
             free_worker = None
             for worker in self.workers:
                 if not worker.is_busy:
@@ -156,31 +141,22 @@ class BotManager:
             if not free_worker:
                 break
 
-            # Get next channel from queue
             try:
-                channel = self.queue.get_nowait()
+                channel_id, channel_name = self.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
 
-            # Check if channel still exists and has members
-            if not channel.members:
-                logger.info(f"Channel {channel.name} is empty, removing from queue")
-                continue
-
-            # Start recording
-            success = await free_worker.start_recording(channel)
+            success = await free_worker.start_recording(channel_id, channel_name)
             if success:
-                logger.info(f"Assigned queued channel {channel.name} to worker {free_worker.worker_id}")
-                # Update queue entry in DB
-                await self._update_queue_status(channel.id, "assigned", free_worker.worker_id)
+                logger.info(f"Assigned queued channel {channel_name} to worker {free_worker.worker_id}")
+                await self._update_queue_status(channel_id, "assigned", free_worker.worker_id)
             else:
-                logger.error(f"Failed to start recording for queued channel {channel.name}")
-                await self._update_queue_status(channel.id, "failed")
+                logger.error(f"Failed to start recording for queued channel {channel_name}")
+                await self._update_queue_status(channel_id, "failed")
 
     async def _update_queue_status(
         self, channel_id: int, status: str, worker_id: int | None = None
     ):
-        """Update queue entry status in database."""
         try:
             async with AsyncSessionLocal() as db:
                 entry = (await db.execute(
@@ -200,7 +176,6 @@ class BotManager:
             logger.error(f"Failed to update queue status: {e}")
 
     async def _save_recording(self, worker_id: int, metadata: dict[str, Any]):
-        """Save recording metadata to database."""
         try:
             async with AsyncSessionLocal() as db:
                 recording = VoiceRecording(
@@ -216,7 +191,6 @@ class BotManager:
                 db.add(recording)
                 await db.flush()
 
-                # Save participants
                 for participant in metadata.get("participants", []):
                     db.add(VoiceRecordingParticipant(
                         recording_id=recording.id,
@@ -234,7 +208,6 @@ class BotManager:
             logger.error(f"Failed to save recording to database: {e}")
 
     def get_status(self) -> dict[str, Any]:
-        """Get status of all workers and queue."""
         return {
             "workers": [w.get_status() for w in self.workers],
             "queue_size": self.queue.qsize(),
@@ -244,14 +217,12 @@ class BotManager:
         }
 
     def get_worker_by_channel(self, channel_id: int) -> WorkerBot | None:
-        """Find worker recording a specific channel."""
         for worker in self.workers:
-            if worker.current_channel and worker.current_channel.id == channel_id:
+            if worker.current_channel_id == channel_id:
                 return worker
         return None
 
     async def stop_recording_channel(self, channel_id: int) -> dict[str, Any] | None:
-        """Stop recording a specific channel."""
         worker = self.get_worker_by_channel(channel_id)
         if worker:
             return await self.release_worker(worker)
