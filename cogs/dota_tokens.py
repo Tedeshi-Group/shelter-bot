@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -13,7 +14,6 @@ from sqlalchemy.orm import selectinload
 from database import AsyncSessionLocal
 from models import (
     DotaToken,
-    TokenFulfillment,
     TokenRequest,
     TokenRequestItem,
     User,
@@ -130,6 +130,15 @@ class TokenRequestView(discord.ui.View):
         button.callback = self.create_request
         self.add_item(button)
 
+    @staticmethod
+    def _is_persistent_view_message(message: discord.Message) -> bool:
+        """Check if a message is the persistent view message by its component custom_ids."""
+        for row in message.components:
+            for component in row.children:
+                if component.custom_id in ("token_select", "token_create"):
+                    return True
+        return False
+
     async def token_select_callback(self, interaction: discord.Interaction):
         token_ids = [int(v) for v in interaction.data.get("values", [])]
         self.selected_tokens[interaction.user.id] = token_ids
@@ -222,7 +231,7 @@ class TokenRequestView(discord.ui.View):
             bonus_today = (await db.execute(
                 select(TokenRequest)
                 .where(TokenRequest.requester_id == user_id)
-                .where(TokenRequest.creation_bonus == True)
+                .where(TokenRequest.creation_bonus.is_(True))
                 .where(TokenRequest.created_at >= today_start)
             )).scalar_one_or_none()
 
@@ -248,9 +257,29 @@ class TokenRequestView(discord.ui.View):
         channel = interaction.channel
         msg = await channel.send(embed=embed, view=view)
 
+        # Create private thread for the requester immediately
+        thread = await channel.create_thread(
+            name=f"Сделка #{request.id}",
+            auto_archive_duration=1440,
+            type=discord.ChannelType.private_thread,
+        )
+        requester_member = interaction.guild.get_member(user_id)
+        if requester_member:
+            await thread.add_user(requester_member)
+
+        thread_embed = discord.Embed(
+            title=f"Сделка #{request.id}",
+            description="Здесь вы будете получать уведомления о жетонах.\nНажмите **«Закрыть сделку»** чтобы отменить незаполненные жетоны.",
+            color=discord.Color.blue(),
+        )
+        token_lines = [f"{t.emoji} {t.name}" for t in tokens]
+        thread_embed.add_field(name="Нужные жетоны", value="\n".join(token_lines), inline=False)
+        await thread.send(embed=thread_embed, view=ThreadCloseView(request.id))
+
         async with AsyncSessionLocal() as db2:
             req = await db2.get(TokenRequest, request.id)
             req.message_id = msg.id
+            req.thread_id = thread.id
             await db2.commit()
 
         self.selected_tokens.pop(user_id, None)
@@ -299,7 +328,7 @@ class TokenRequestView(discord.ui.View):
 
 
 class RequestView(discord.ui.View):
-    """View on request embed: Select menu for fulfillers + Close button for requester."""
+    """View on request embed: Select menu for fulfillers only."""
 
     def __init__(self, request_id: int, tokens: list[DotaToken] | None = None):
         super().__init__(timeout=None)
@@ -319,8 +348,6 @@ class RequestView(discord.ui.View):
             )
             select.callback = self.fulfill_callback
             self.add_item(select)
-
-        self.add_item(CloseButton(request_id))
 
     async def fulfill_callback(self, interaction: discord.Interaction):
         token_id = int(interaction.data["values"][0])
@@ -465,8 +492,23 @@ class TokenConfirmView(discord.ui.View):
         self.request_id = request_id
         self.token_id = token_id
 
-    @discord.ui.button(label="Подтвердить", style=discord.ButtonStyle.success, custom_id="token_item_confirm")
-    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        confirm_btn = discord.ui.Button(
+            label="Подтвердить",
+            style=discord.ButtonStyle.success,
+            custom_id=f"token_confirm_{request_id}_{token_id}",
+        )
+        confirm_btn.callback = self.confirm_button
+        self.add_item(confirm_btn)
+
+        dispute_btn = discord.ui.Button(
+            label="Спор",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"token_dispute_{request_id}_{token_id}",
+        )
+        dispute_btn.callback = self.dispute_button
+        self.add_item(dispute_btn)
+
+    async def confirm_button(self, interaction: discord.Interaction):
         async with AsyncSessionLocal() as db:
             request = (await db.execute(
                 select(TokenRequest)
@@ -512,8 +554,7 @@ class TokenConfirmView(discord.ui.View):
                 await asyncio.sleep(3)
                 await interaction.message.thread.delete()
 
-    @discord.ui.button(label="Спор", style=discord.ButtonStyle.danger, custom_id="token_item_dispute")
-    async def dispute_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def dispute_button(self, interaction: discord.Interaction):
         async with AsyncSessionLocal() as db:
             request = (await db.execute(
                 select(TokenRequest)
@@ -570,15 +611,27 @@ class TokenConfirmView(discord.ui.View):
         )
 
 
-class CloseButton(discord.ui.Button):
-    def __init__(self, request_id: int):
-        super().__init__(label="Закрыть", style=discord.ButtonStyle.secondary, custom_id=f"token_close_{request_id}")
-        self.request_id = request_id
+class ThreadCloseView(discord.ui.View):
+    """Close button inside the private thread — only visible to requester."""
 
-    async def callback(self, interaction: discord.Interaction):
+    def __init__(self, request_id: int):
+        super().__init__(timeout=None)
+        self.request_id = request_id
+        # Add button programmatically with unique custom_id
+        btn = discord.ui.Button(
+            label="Закрыть сделку",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"thread_close_{request_id}",
+        )
+        btn.callback = self.close_button
+        self.add_item(btn)
+
+    async def close_button(self, interaction: discord.Interaction):
         async with AsyncSessionLocal() as db:
             request = (await db.execute(
-                select(TokenRequest).where(TokenRequest.id == self.request_id)
+                select(TokenRequest)
+                .options(selectinload(TokenRequest.tokens))
+                .where(TokenRequest.id == self.request_id)
             )).scalar_one_or_none()
 
             if not request:
@@ -593,110 +646,129 @@ class CloseButton(discord.ui.Button):
                 await interaction.response.send_message("Этот запрос уже завершён.", ephemeral=True)
                 return
 
-            thread_id = request.thread_id
+            message_id = request.message_id
+            channel_id = request.channel_id
             request.status = "closed"
             await db.commit()
 
+        if message_id and channel_id:
+            channel = interaction.guild.get_channel(channel_id)
+            if channel:
+                try:
+                    msg = await channel.fetch_message(message_id)
+                    await msg.delete()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+
+        await interaction.response.send_message("Сделка закрыта. Тред будет удалён через 5 секунд.")
+        await asyncio.sleep(5)
         try:
-            await interaction.message.delete()
+            await interaction.channel.delete()
         except discord.HTTPException:
             pass
 
-        if thread_id:
-            thread = interaction.guild.get_thread(thread_id)
-            if thread:
-                try:
-                    await thread.delete()
-                except discord.HTTPException:
-                    pass
-
-        await interaction.response.defer()
-
 
 class DealsMenuView(discord.ui.View):
-    """Ephemeral view for managing deals."""
+    """Ephemeral view for managing deals with pagination (up to 5 SelectMenus)."""
 
-    def __init__(self, active: list[TokenRequest], closed: list[TokenRequest], admin_id: int):
+    def __init__(self, active: list[TokenRequest], closed: list[TokenRequest], admin_id: int, target_user_id: int):
         super().__init__(timeout=300)
         self.admin_id = admin_id
+        self.target_user_id = target_user_id
+        self._uid = uuid.uuid4().hex[:8]
 
-        if active:
-            options = [
-                discord.SelectOption(
-                    label=f"#{r.id}",
-                    description=f"Статус: {r.status}",
-                    value=f"active_{r.id}",
-                    emoji="🟢" if r.status == "open" else "🟡",
-                )
-                for r in active
-            ][:25]
-            active_select = discord.ui.Select(
-                placeholder="Активные сделки...",
+        # Combine: active first, then closed
+        all_requests = active + closed
+        chunk_size = 25
+
+        for i in range(0, min(len(all_requests), chunk_size * 5), chunk_size):
+            chunk = all_requests[i:i + chunk_size]
+            page_num = (i // chunk_size) + 1
+            options = []
+            for r in chunk:
+                is_active = r.status in ("open", "in_progress")
+                emoji = {"open": "🟢", "in_progress": "🟡", "confirmed": "✅", "closed": "⚫", "rejected": "❌", "disputed": "🔴"}.get(r.status, "⚪")
+                prefix = "active" if is_active else "closed"
+                options.append(discord.SelectOption(
+                    label=f"#{r.id} — {r.status}",
+                    value=f"{prefix}_{r.id}",
+                    emoji=emoji,
+                ))
+
+            select = discord.ui.Select(
+                placeholder=f"Сделки {i + 1}-{i + len(chunk)}...",
                 options=options,
-                custom_id="deals_active_select",
+                custom_id=f"deals_sel_{self._uid}_{page_num}",
             )
-            active_select.callback = self.active_select_callback
-            self.add_item(active_select)
+            select.callback = self.deal_select_callback
+            self.add_item(select)
 
-        if closed:
-            options = [
-                discord.SelectOption(
-                    label=f"#{r.id}",
-                    description=f"Статус: {r.status}",
-                    value=f"closed_{r.id}",
-                    emoji={"confirmed": "✅", "closed": "⚫", "rejected": "❌", "disputed": "🔴"}.get(r.status, "⚪"),
-                )
-                for r in closed
-            ][:25]
-            closed_select = discord.ui.Select(
-                placeholder="Завершённые сделки...",
-                options=options,
-                custom_id="deals_closed_select",
+    async def deal_select_callback(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        prefix, request_id_str = value.split("_", 1)
+        request_id = int(request_id_str)
+
+        if prefix == "active":
+            view = DealActionView(request_id, self.admin_id, self.target_user_id)
+            await interaction.response.send_message(
+                f"Сделка #{request_id}",
+                view=view,
+                ephemeral=True,
             )
-            closed_select.callback = self.closed_select_callback
-            self.add_item(closed_select)
+        else:
+            async with AsyncSessionLocal() as db:
+                request = await db.get(TokenRequest, request_id)
 
-    async def active_select_callback(self, interaction: discord.Interaction):
-        request_id = int(interaction.data["values"][0].split("_")[1])
+            if request and request.thread_id:
+                thread = interaction.guild.get_thread(request.thread_id)
+                if thread:
+                    await interaction.response.send_message(
+                        f"Перейти к сделке: {thread.mention}",
+                        ephemeral=True,
+                    )
+                    return
 
-        view = DealActionView(request_id, self.admin_id)
-        await interaction.response.send_message(
-            f"Сделка #{request_id}",
-            view=view,
-            ephemeral=True,
-        )
-
-    async def closed_select_callback(self, interaction: discord.Interaction):
-        request_id = int(interaction.data["values"][0].split("_")[1])
-
-        async with AsyncSessionLocal() as db:
-            request = await db.get(TokenRequest, request_id)
-
-        if request and request.thread_id:
-            thread = interaction.guild.get_thread(request.thread_id)
-            if thread:
-                await interaction.response.send_message(
-                    f"Перейти к сделке: {thread.mention}",
-                    ephemeral=True,
-                )
-                return
-
-        await interaction.response.send_message(
-            f"Сделка #{request_id} — тред не найден.",
-            ephemeral=True,
-        )
+            await interaction.response.send_message(
+                f"Сделка #{request_id} — тред не найден.",
+                ephemeral=True,
+            )
 
 
 class DealActionView(discord.ui.View):
     """Buttons for active deal management."""
 
-    def __init__(self, request_id: int, admin_id: int):
+    def __init__(self, request_id: int, admin_id: int, target_user_id: int | None = None):
         super().__init__(timeout=120)
         self.request_id = request_id
         self.admin_id = admin_id
+        self.target_user_id = target_user_id
 
-    @discord.ui.button(label="Закрыть принудительно", style=discord.ButtonStyle.danger, custom_id="deal_force_close")
-    async def force_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Add buttons programmatically with unique custom_ids
+        force_btn = discord.ui.Button(
+            label="Закрыть принудительно",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"deal_force_{request_id}",
+        )
+        force_btn.callback = self.force_close
+        self.add_item(force_btn)
+
+        manage_btn = discord.ui.Button(
+            label="Управление пользователем",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"deal_manage_{request_id}",
+        )
+        manage_btn.callback = self.manage_user
+        self.add_item(manage_btn)
+
+        back_btn = discord.ui.Button(
+            label="Назад в меню",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"deal_back_{request_id}",
+        )
+        back_btn.callback = self.back_to_menu
+        self.add_item(back_btn)
+
+    async def force_close(self, interaction: discord.Interaction):
         if interaction.user.id != self.admin_id:
             await interaction.response.send_message("Только администратор может закрыть сделку.", ephemeral=True)
             return
@@ -737,24 +809,46 @@ class DealActionView(discord.ui.View):
 
         await interaction.response.send_message(f"Сделка #{self.request_id} закрыта.", ephemeral=True)
 
-    @discord.ui.button(label="Назад в меню", style=discord.ButtonStyle.secondary, custom_id="deal_back")
-    async def back_to_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def manage_user(self, interaction: discord.Interaction):
+        if interaction.user.id != self.admin_id:
+            await interaction.response.send_message("Только администратор может управлять пользователями.", ephemeral=True)
+            return
+
+        if not self.target_user_id:
+            await interaction.response.send_message("Пользователь не определён.", ephemeral=True)
+            return
+
+        view = UserManageView(self.target_user_id, self.admin_id)
+        await interaction.response.send_message(
+            f"Управление <@{self.target_user_id}>",
+            view=view,
+            ephemeral=True,
+        )
+
+    async def back_to_menu(self, interaction: discord.Interaction):
+        if not self.target_user_id:
+            await interaction.response.send_message("Не удалось определить пользователя.", ephemeral=True)
+            return
+
         async with AsyncSessionLocal() as db:
             active = (await db.execute(
                 select(TokenRequest)
+                .where(TokenRequest.requester_id == self.target_user_id)
                 .where(TokenRequest.status.in_(["open", "in_progress"]))
                 .order_by(TokenRequest.created_at.desc())
             )).scalars().all()
 
             closed = (await db.execute(
                 select(TokenRequest)
+                .where(TokenRequest.requester_id == self.target_user_id)
                 .where(TokenRequest.status.in_(["confirmed", "closed", "rejected", "disputed"]))
                 .order_by(TokenRequest.created_at.desc())
-                .limit(20)
+                .limit(100)
             )).scalars().all()
 
-        view = DealsMenuView(active, closed, self.admin_id)
-        embed = DotaTokens._build_deals_embed(active, closed)
+        member = interaction.guild.get_member(self.target_user_id)
+        view = DealsMenuView(active, closed, self.admin_id, self.target_user_id)
+        embed = DotaTokens._build_deals_embed(active, closed, member)
         await interaction.response.edit_message(embed=embed, view=view)
 
 
@@ -766,56 +860,56 @@ class UserManageView(discord.ui.View):
         self.target_user_id = target_user_id
         self.admin_id = admin_id
 
-    @discord.ui.button(label="Заблокировать отправку", style=discord.ButtonStyle.danger, custom_id="block_sending")
-    async def block_sending(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = target_user_id
+        buttons = [
+            ("Заблокировать отправку", discord.ButtonStyle.danger, f"block_send_{uid}", self.block_sending),
+            ("Разблокировать отправку", discord.ButtonStyle.success, f"unblock_send_{uid}", self.unblock_sending),
+            ("Заблокировать создание", discord.ButtonStyle.danger, f"block_create_{uid}", self.block_creating),
+            ("Разблокировать создание", discord.ButtonStyle.success, f"unblock_create_{uid}", self.unblock_creating),
+        ]
+        for label, style, custom_id, callback in buttons:
+            btn = discord.ui.Button(label=label, style=style, custom_id=custom_id)
+            btn.callback = callback
+            self.add_item(btn)
+
+    async def block_sending(self, interaction: discord.Interaction):
         if interaction.user.id != self.admin_id:
             return
-
         async with AsyncSessionLocal() as db:
             user = await db.get(User, self.target_user_id)
             if user:
                 user.blocked_sending = True
                 await db.commit()
-
         await interaction.response.send_message(f"Пользователь <@{self.target_user_id}> заблокирован от отправки.", ephemeral=True)
 
-    @discord.ui.button(label="Разблокировать отправку", style=discord.ButtonStyle.success, custom_id="unblock_sending")
-    async def unblock_sending(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def unblock_sending(self, interaction: discord.Interaction):
         if interaction.user.id != self.admin_id:
             return
-
         async with AsyncSessionLocal() as db:
             user = await db.get(User, self.target_user_id)
             if user:
                 user.blocked_sending = False
                 await db.commit()
-
         await interaction.response.send_message(f"Пользователь <@{self.target_user_id}> разблокирован для отправки.", ephemeral=True)
 
-    @discord.ui.button(label="Заблокировать создание", style=discord.ButtonStyle.danger, custom_id="block_creating")
-    async def block_creating(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def block_creating(self, interaction: discord.Interaction):
         if interaction.user.id != self.admin_id:
             return
-
         async with AsyncSessionLocal() as db:
             user = await db.get(User, self.target_user_id)
             if user:
                 user.blocked_creating = True
                 await db.commit()
-
         await interaction.response.send_message(f"Пользователь <@{self.target_user_id}> заблокирован от создания сделок.", ephemeral=True)
 
-    @discord.ui.button(label="Разблокировать создание", style=discord.ButtonStyle.success, custom_id="unblock_creating")
-    async def unblock_creating(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def unblock_creating(self, interaction: discord.Interaction):
         if interaction.user.id != self.admin_id:
             return
-
         async with AsyncSessionLocal() as db:
             user = await db.get(User, self.target_user_id)
             if user:
                 user.blocked_creating = False
                 await db.commit()
-
         await interaction.response.send_message(f"Пользователь <@{self.target_user_id}> разблокирован для создания.", ephemeral=True)
 
 
@@ -825,6 +919,7 @@ class DotaTokens(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._view_registered = False
+        self._persistent_msg_id: int | None = None
         log.info("DotaTokens cog initialized")
 
     @commands.Cog.listener()
@@ -844,7 +939,9 @@ class DotaTokens(commands.Cog):
             )).scalars().all()
 
             active_requests = (await db.execute(
-                select(TokenRequest).where(TokenRequest.status.in_(["open", "in_progress"]))
+                select(TokenRequest)
+                .options(selectinload(TokenRequest.tokens))
+                .where(TokenRequest.status.in_(["open", "in_progress"]))
             )).scalars().all()
 
         if not tokens:
@@ -859,7 +956,7 @@ class DotaTokens(commands.Cog):
                 items = (await db.execute(
                     select(TokenRequestItem)
                     .where(TokenRequestItem.request_id == req.id)
-                    .where(TokenRequestItem.fulfilled == False)
+                    .where(TokenRequestItem.fulfilled.is_(False))
                 )).scalars().all()
                 remaining_tokens = []
                 for item in items:
@@ -870,6 +967,13 @@ class DotaTokens(commands.Cog):
             rv = RequestView(req.id, remaining_tokens if remaining_tokens else None)
             self.bot.add_view(rv)
 
+            # Register ThreadCloseView for each active request
+            self.bot.add_view(ThreadCloseView(req.id))
+
+            # Register TokenConfirmView for each token in active requests
+            for item in req.tokens:
+                self.bot.add_view(TokenConfirmView(req.id, item.token_id))
+
         channel = self.bot.get_channel(TOKEN_CHANNEL_ID)
         if not channel:
             log.warning("Channel %s not found!", TOKEN_CHANNEL_ID)
@@ -877,16 +981,23 @@ class DotaTokens(commands.Cog):
 
         log.info("Found channel: %s (%s)", channel.name, channel.id)
 
-        async for message in channel.history(limit=10):
-            if message.author == self.bot.user and message.components:
-                embed = self._build_main_embed()
-                await message.edit(embed=embed, view=view)
-                log.info("Persistent view message updated")
-                return
+        # Find the earliest bot message that IS the persistent view
+        persistent_msg = None
+        async for message in channel.history(limit=50, oldest_first=True):
+            if message.author == self.bot.user and TokenRequestView._is_persistent_view_message(message):
+                persistent_msg = message
+                break
 
-        embed = self._build_main_embed()
-        await channel.send(embed=embed, view=view)
-        log.info("Persistent view message sent to channel")
+        if persistent_msg:
+            embed = self._build_main_embed()
+            await persistent_msg.edit(embed=embed, view=view)
+            self._persistent_msg_id = persistent_msg.id
+            log.info("Persistent view message found and updated (id=%s)", persistent_msg.id)
+        else:
+            embed = self._build_main_embed()
+            msg = await channel.send(embed=embed, view=view)
+            self._persistent_msg_id = msg.id
+            log.info("Persistent view message created (id=%s)", msg.id)
 
     @staticmethod
     def _build_main_embed() -> discord.Embed:
@@ -1083,8 +1194,9 @@ class DotaTokens(commands.Cog):
 
     # --- Deals command (admin) ---
 
-    @app_commands.command(name="deals", description="Управление сделками (только админы)")
-    async def deals(self, interaction: discord.Interaction):
+    @app_commands.command(name="deals", description="Управление сделками пользователя (только админы)")
+    @app_commands.describe(member="Пользователь для просмотра сделок")
+    async def deals(self, interaction: discord.Interaction, member: discord.Member):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("Только администраторы могут использовать эту команду.", ephemeral=True)
             return
@@ -1092,43 +1204,56 @@ class DotaTokens(commands.Cog):
         async with AsyncSessionLocal() as db:
             active = (await db.execute(
                 select(TokenRequest)
+                .where(TokenRequest.requester_id == member.id)
                 .where(TokenRequest.status.in_(["open", "in_progress"]))
                 .order_by(TokenRequest.created_at.desc())
             )).scalars().all()
 
             closed = (await db.execute(
                 select(TokenRequest)
+                .where(TokenRequest.requester_id == member.id)
                 .where(TokenRequest.status.in_(["confirmed", "closed", "rejected", "disputed"]))
                 .order_by(TokenRequest.created_at.desc())
-                .limit(20)
+                .limit(100)
             )).scalars().all()
 
-        view = DealsMenuView(active, closed, interaction.user.id)
+        view = DealsMenuView(active, closed, interaction.user.id, member.id)
         await interaction.response.send_message(
-            embed=self._build_deals_embed(active, closed),
+            embed=self._build_deals_embed(active, closed, member),
             view=view,
             ephemeral=True,
         )
 
     @staticmethod
-    def _build_deals_embed(active: list[TokenRequest], closed: list[TokenRequest]) -> discord.Embed:
-        embed = discord.Embed(title="Управление сделками", color=discord.Color.blue())
+    def _build_deals_embed(
+        active: list[TokenRequest],
+        closed: list[TokenRequest],
+        member: discord.Member | None = None,
+    ) -> discord.Embed:
+        title = f"Сделки {member.display_name}" if member else "Управление сделками"
+        embed = discord.Embed(title=title, color=discord.Color.blue())
+        if member:
+            embed.set_thumbnail(url=member.display_avatar.url)
 
         if active:
             active_lines = []
             for r in active:
                 status_emoji = "🟢" if r.status == "open" else "🟡"
-                active_lines.append(f"{status_emoji} #{r.id} — <@{r.requester_id}>")
+                active_lines.append(f"{status_emoji} #{r.id}")
             embed.add_field(name=f"Активные ({len(active)})", value="\n".join(active_lines), inline=False)
         else:
             embed.add_field(name="Активные", value="Нет активных сделок", inline=False)
 
         if closed:
             closed_lines = []
-            for r in closed:
+            for r in closed[:25]:
                 status_emoji = {"confirmed": "✅", "closed": "⚫", "rejected": "❌", "disputed": "🔴"}.get(r.status, "⚪")
-                closed_lines.append(f"{status_emoji} #{r.id} — <@{r.requester_id}>")
+                closed_lines.append(f"{status_emoji} #{r.id}")
             embed.add_field(name=f"Завершённые ({len(closed)})", value="\n".join(closed_lines), inline=False)
+
+        total = len(active) + len(closed)
+        if total > 25:
+            embed.set_footer(text=f"Всего: {total} сделок (показано до 125 в меню)")
 
         return embed
 
@@ -1195,15 +1320,20 @@ class DotaTokens(commands.Cog):
         if not tokens:
             return
 
+        if not hasattr(self, '_persistent_msg_id') or not self._persistent_msg_id:
+            return
+
         channel = self.bot.get_channel(TOKEN_CHANNEL_ID)
         if not channel:
             return
 
-        async for message in channel.history(limit=10):
-            if message.author == self.bot.user and message.components:
-                view = TokenRequestView(tokens)
-                await message.edit(view=view)
-                break
+        try:
+            message = await channel.fetch_message(self._persistent_msg_id)
+            view = TokenRequestView(tokens)
+            await message.edit(view=view)
+        except (discord.NotFound, discord.HTTPException) as e:
+            log.warning("Failed to refresh persistent view: %s", e)
+            self._persistent_msg_id = None
 
 
 async def setup(bot: commands.Bot):
