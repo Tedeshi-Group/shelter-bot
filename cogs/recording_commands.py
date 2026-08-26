@@ -95,7 +95,7 @@ class RecordingCommands(commands.Cog):
             return
 
         # Assign to worker
-        worker = await self.bot_manager.assign_channel(channel)
+        worker = await self.bot_manager.assign_channel(channel.id, channel.name)
 
         if worker:
             embed = discord.Embed(

@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,7 +7,7 @@ from typing import Any
 
 import discord
 from discord.ext import commands
-from discord.ext.voice_recv import VoiceRecvClient, WaveSink, FFmpegSink
+from discord.ext.voice_recv import VoiceRecvClient, WaveSink
 
 logger = logging.getLogger(__name__)
 
@@ -22,21 +21,17 @@ class VoiceRecorder:
         self.vc: VoiceRecvClient | None = None
         self.sink: WaveSink | None = None
         self.started_at: datetime | None = None
-        self.participants: dict[int, dict[str, Any]] = {}  # user_id -> {username, joined_at, left_at}
+        self.participants: dict[int, dict[str, Any]] = {}
         self._recording = False
 
     async def start(self) -> bool:
         """Start recording. Returns True if successful."""
         try:
-            # Connect to voice channel with VoiceRecvClient
             self.vc = await self.channel.connect(cls=VoiceRecvClient)
             self.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
             self._recording = True
 
-            # Create sink for recording
             self.sink = WaveSink(str(self.output_path))
-
-            # Start listening
             self.vc.listen(self.sink)
 
             logger.info(f"Started recording in {self.channel.name} ({self.channel.id})")
@@ -55,21 +50,17 @@ class VoiceRecorder:
         self._recording = False
         ended_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        # Stop listening and disconnect
         if self.vc:
             self.vc.stop_listening()
             await self.vc.disconnect()
 
-        # Cleanup sink
         if self.sink:
             self.sink.cleanup()
 
-        # Calculate duration
         duration_seconds = None
         if self.started_at:
             duration_seconds = int((ended_at - self.started_at).total_seconds())
 
-        # Update participant durations
         for user_id, info in self.participants.items():
             if info["left_at"] is None:
                 info["left_at"] = ended_at
@@ -105,7 +96,6 @@ class VoiceRecorder:
         return metadata
 
     def add_participant(self, user: discord.Member):
-        """Track a participant joining."""
         if user.id not in self.participants:
             self.participants[user.id] = {
                 "username": user.name,
@@ -114,12 +104,10 @@ class VoiceRecorder:
                 "duration_seconds": None,
             }
         elif self.participants[user.id]["left_at"] is not None:
-            # User rejoined
             self.participants[user.id]["joined_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
             self.participants[user.id]["left_at"] = None
 
     def remove_participant(self, user: discord.Member):
-        """Track a participant leaving."""
         if user.id in self.participants and self.participants[user.id]["left_at"] is None:
             self.participants[user.id]["left_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
             if self.participants[user.id]["joined_at"]:
@@ -137,7 +125,7 @@ class WorkerBot:
         self.bot: commands.Bot | None = None
         self.recorder: VoiceRecorder | None = None
         self.is_busy = False
-        self.current_channel: discord.VoiceChannel | None = None
+        self.current_channel_id: int | None = None
         self._ready = asyncio.Event()
 
     async def start(self):
@@ -155,76 +143,85 @@ class WorkerBot:
 
         @self.bot.event
         async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-            """Track participant join/leave for recording."""
-            if not self.recorder or not self._recording:
+            if not self.recorder or not self.current_channel_id:
                 return
-
-            # User joined the channel we're recording
-            if after.channel and after.channel.id == self.current_channel.id:
+            if after.channel and after.channel.id == self.current_channel_id:
                 self.recorder.add_participant(member)
-
-            # User left the channel we're recording
-            if before.channel and before.channel.id == self.current_channel.id:
+            if before.channel and before.channel.id == self.current_channel_id:
                 self.recorder.remove_participant(member)
 
-        # Start bot in background
         asyncio.create_task(self.bot.start(self.token))
         await asyncio.wait_for(self._ready.wait(), timeout=30)
 
     async def stop(self):
-        """Stop the worker bot."""
         if self.recorder:
             await self.recorder.stop()
         if self.bot:
             await self.bot.close()
 
-    async def start_recording(self, channel: discord.VoiceChannel) -> bool:
-        """Start recording a voice channel."""
+    def _find_channel(self, channel_id: int) -> discord.VoiceChannel | None:
+        """Find a voice channel in the worker bot's own guild cache."""
+        for guild in self.bot.guilds:
+            channel = guild.get_channel(channel_id)
+            if isinstance(channel, discord.VoiceChannel):
+                return channel
+        return None
+
+    async def start_recording(self, channel_id: int, channel_name: str) -> bool:
+        """Start recording a voice channel by ID."""
         if self.is_busy:
             logger.warning(f"Worker {self.worker_id} is already busy")
             return False
 
-        self.is_busy = True
-        self.current_channel = channel
+        # Find channel in THIS worker's guild cache
+        channel = self._find_channel(channel_id)
+        if not channel:
+            logger.error(f"Worker {self.worker_id}: channel {channel_id} not found in guild cache")
+            return False
 
-        # Create output file
+        self.is_busy = True
+        self.current_channel_id = channel_id
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"worker-{self.worker_id}_{channel.name}_{timestamp}.wav"
+        filename = f"worker-{self.worker_id}_{channel_name}_{timestamp}.wav"
         output_path = Path(tempfile.gettempdir()) / "shelter_recordings" / filename
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Create recorder
         self.recorder = VoiceRecorder(channel, output_path)
         success = await self.recorder.start()
 
         if not success:
             self.is_busy = False
-            self.current_channel = None
+            self.current_channel_id = None
             self.recorder = None
             return False
 
         return True
 
     async def stop_recording(self) -> dict[str, Any] | None:
-        """Stop recording and return metadata."""
         if not self.recorder:
             return None
 
         metadata = await self.recorder.stop()
         self.is_busy = False
-        self.current_channel = None
+        self.current_channel_id = None
         self.recorder = None
 
         return metadata
 
     def get_status(self) -> dict[str, Any]:
-        """Get current status of the worker."""
+        channel_name = None
+        if self.current_channel_id and self.bot:
+            ch = self._find_channel(self.current_channel_id)
+            if ch:
+                channel_name = ch.name
+
         status = {
             "worker_id": self.worker_id,
             "is_busy": self.is_busy,
-            "current_channel": self.current_channel.name if self.current_channel else None,
+            "current_channel": channel_name,
             "bot_user": str(self.bot.user) if self.bot and self.bot.user else None,
-            "is_connected": self.bot and self.bot.is_ready() if self.bot else False,
+            "is_connected": self.bot.is_ready() if self.bot else False,
         }
 
         if self.recorder and self.recorder.started_at:
