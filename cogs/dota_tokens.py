@@ -133,11 +133,15 @@ class TokenRequestView(discord.ui.View):
     @staticmethod
     def _is_persistent_view_message(message: discord.Message) -> bool:
         """Check if a message is the persistent view message by its component custom_ids."""
+        found_ids = set()
         for row in message.components:
             for component in row.children:
-                if component.custom_id in ("token_select", "token_create"):
-                    return True
-        return False
+                cid = component.custom_id
+                if cid.startswith("token_fulfill_"):
+                    return False
+                if cid in ("token_select", "token_create"):
+                    found_ids.add(cid)
+        return found_ids == {"token_select", "token_create"}
 
     async def token_select_callback(self, interaction: discord.Interaction):
         token_ids = [int(v) for v in interaction.data.get("values", [])]
