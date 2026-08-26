@@ -89,7 +89,7 @@ class RecordingCommands(commands.Cog):
             await interaction.response.send_message("BotManager not initialized", ephemeral=True)
             return
 
-        status = self.bot_manager.get_all_status()
+        status = self.bot_manager.get_status()
 
         embed = discord.Embed(title="Recording Status", color=discord.Color.blue())
 
@@ -112,7 +112,7 @@ class RecordingCommands(commands.Cog):
         )
         embed.add_field(
             name="Active",
-            value=f"{status['active_count']}/{len(status['workers'])}",
+            value=f"{status['busy_workers']}/{status['total_workers']}",
             inline=True
         )
 
