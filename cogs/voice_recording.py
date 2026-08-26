@@ -14,7 +14,7 @@ from typing import Any
 
 import discord
 from discord.ext import commands, tasks
-from discord.ext.voice_recv import VoiceRecvClient
+from discord.ext.voice_recv import AudioSink, VoiceRecvClient, VoiceData
 
 from database import SessionLocal
 from models.voice_recording import VoiceRecording, VoiceRecordingParticipant, VoiceRecordingTrack
@@ -26,10 +26,11 @@ CHANNELS = 2
 SAMPLE_WIDTH = 2  # 16-bit
 
 
-class PerUserWaveSink:
+class PerUserWaveSink(AudioSink):
     """Sink that creates a separate WAV file per speaker (by SSRC/user)."""
 
     def __init__(self, recording_id: int, temp_dir: str):
+        super().__init__()
         self.recording_id = recording_id
         self.temp_dir = temp_dir
         self._files: dict[int, io.BufferedRandom] = {}
@@ -54,10 +55,10 @@ class PerUserWaveSink:
     def wants_opus(self) -> bool:
         return False
 
-    def write(self, user: discord.Member | None, data: discord.AudioData):
+    def write(self, user: discord.Member | None, data: VoiceData):
         if user is None:
             return
-        ssrc = data.ssrc if hasattr(data, 'ssrc') else 0
+        ssrc = data.packet.ssrc
         if ssrc == 0:
             return
 
@@ -66,9 +67,8 @@ class PerUserWaveSink:
             self._username_map[ssrc] = user.display_name
 
         f = self._get_file(ssrc)
-        pcm_bytes = data.pcm if hasattr(data, 'pcm') else bytes(data)
-        f.write(pcm_bytes)
-        self._pcm_sizes[ssrc] = self._pcm_sizes.get(ssrc, 0) + len(pcm_bytes)
+        f.write(data.pcm)
+        self._pcm_sizes[ssrc] = self._pcm_sizes.get(ssrc, 0) + len(data.pcm)
 
     def _write_wav_header(self, f: io.BufferedRandom, data_size: int):
         f.seek(0)
