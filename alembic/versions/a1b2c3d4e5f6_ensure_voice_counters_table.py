@@ -1,7 +1,7 @@
 """ensure_voice_counters_table
 
 Revision ID: a1b2c3d4e5f6
-Revises: edc5e49fb5df
+Revises: 33d567f0080c
 Create Date: 2026-08-26 11:00:00.000000
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'a1b2c3d4e5f6'
-down_revision: Union[str, Sequence[str], None] = 'edc5e49fb5df'
+down_revision: Union[str, Sequence[str], None] = '33d567f0080c'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
