@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from database import SessionLocal
@@ -27,51 +28,50 @@ class RecordingCommands(commands.Cog):
     def bot_manager(self) -> "BotManager | None":
         return getattr(self.bot, 'bot_manager', None)
 
-    @commands.slash_command(name="record", description="Voice recording management")
-    @commands.has_permissions(administrator=True)
-    async def record(self, ctx: discord.ApplicationContext):
-        pass
-
-    @record.command(name="start", description="Start recording in a voice channel")
-    @commands.has_permissions(administrator=True)
-    async def record_start(self, ctx: discord.ApplicationContext, channel: discord.VoiceChannel):
+    @app_commands.command(name="record_start", description="Start recording in a voice channel")
+    @app_commands.describe(channel="Voice channel to record")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def record_start(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
         if not self.bot_manager:
-            await ctx.respond("BotManager not initialized", ephemeral=True)
+            await interaction.response.send_message("BotManager not initialized", ephemeral=True)
             return
 
-        await ctx.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
 
         worker = await self.bot_manager.assign_channel(channel.id, channel.name)
         if worker:
-            await ctx.respond(
+            await interaction.followup.send(
                 f"Recording started in {channel.name} (Worker {worker.worker_id})",
                 ephemeral=True
             )
         else:
-            await ctx.respond(
+            await interaction.followup.send(
                 f"All workers busy. Channel {channel.name} added to queue.",
                 ephemeral=True
             )
 
-    @record.command(name="stop", description="Stop recording in a voice channel")
-    @commands.has_permissions(administrator=True)
-    async def record_stop(self, ctx: discord.ApplicationContext, channel: discord.VoiceChannel):
+    @app_commands.command(name="record_stop", description="Stop recording in a voice channel")
+    @app_commands.describe(channel="Voice channel to stop recording")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def record_stop(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
         if not self.bot_manager:
-            await ctx.respond("BotManager not initialized", ephemeral=True)
+            await interaction.response.send_message("BotManager not initialized", ephemeral=True)
             return
 
         worker = self.bot_manager.get_worker_by_channel(channel.id)
         if not worker:
-            await ctx.respond(f"No active recording in {channel.name}", ephemeral=True)
+            await interaction.response.send_message(
+                f"No active recording in {channel.name}", ephemeral=True
+            )
             return
 
-        await ctx.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         result = await self.bot_manager.release_worker(worker)
 
         if result:
             tracks = result.get("tracks_count", 0)
             size_kb = result.get("total_size", 0) / 1024
-            await ctx.respond(
+            await interaction.followup.send(
                 f"Recording stopped in {channel.name}\n"
                 f"Duration: {result['duration']}s\n"
                 f"Tracks: {tracks} speakers\n"
@@ -79,12 +79,12 @@ class RecordingCommands(commands.Cog):
                 ephemeral=True
             )
         else:
-            await ctx.respond("Error stopping recording", ephemeral=True)
+            await interaction.followup.send("Error stopping recording", ephemeral=True)
 
-    @record.command(name="status", description="Show recording status")
-    async def record_status(self, ctx: discord.ApplicationContext):
+    @app_commands.command(name="record_status", description="Show recording status")
+    async def record_status(self, interaction: discord.Interaction):
         if not self.bot_manager:
-            await ctx.respond("BotManager not initialized", ephemeral=True)
+            await interaction.response.send_message("BotManager not initialized", ephemeral=True)
             return
 
         status = self.bot_manager.get_all_status()
@@ -114,10 +114,10 @@ class RecordingCommands(commands.Cog):
             inline=True
         )
 
-        await ctx.respond(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @record.command(name="list", description="List recent recordings")
-    async def record_list(self, ctx: discord.ApplicationContext):
+    @app_commands.command(name="record_list", description="List recent recordings")
+    async def record_list(self, interaction: discord.Interaction):
         with SessionLocal() as db:
             recordings = (
                 db.query(VoiceRecording)
@@ -127,7 +127,7 @@ class RecordingCommands(commands.Cog):
             )
 
             if not recordings:
-                await ctx.respond("No recordings found", ephemeral=True)
+                await interaction.response.send_message("No recordings found", ephemeral=True)
                 return
 
             embed = discord.Embed(title="Recent Recordings", color=discord.Color.green())
@@ -153,14 +153,17 @@ class RecordingCommands(commands.Cog):
                     inline=False
                 )
 
-            await ctx.respond(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @record.command(name="play", description="Get download links for a recording")
-    async def record_play(self, ctx: discord.ApplicationContext, recording_id: int):
+    @app_commands.command(name="record_play", description="Get download links for a recording")
+    @app_commands.describe(recording_id="Recording ID")
+    async def record_play(self, interaction: discord.Interaction, recording_id: int):
         with SessionLocal() as db:
             recording = db.get(VoiceRecording, recording_id)
             if not recording:
-                await ctx.respond(f"Recording #{recording_id} not found", ephemeral=True)
+                await interaction.response.send_message(
+                    f"Recording #{recording_id} not found", ephemeral=True
+                )
                 return
 
             tracks = db.query(VoiceRecordingTrack).filter(
@@ -168,7 +171,9 @@ class RecordingCommands(commands.Cog):
             ).all()
 
             if not tracks:
-                await ctx.respond(f"No tracks found for recording #{recording_id}", ephemeral=True)
+                await interaction.response.send_message(
+                    f"No tracks found for recording #{recording_id}", ephemeral=True
+                )
                 return
 
             from s3_client import S3Client
@@ -191,15 +196,18 @@ class RecordingCommands(commands.Cog):
                     inline=True
                 )
 
-            await ctx.respond(embed=embed, ephemeral=True)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @record.command(name="delete", description="Delete a recording")
-    @commands.has_permissions(administrator=True)
-    async def record_delete(self, ctx: discord.ApplicationContext, recording_id: int):
+    @app_commands.command(name="record_delete", description="Delete a recording")
+    @app_commands.describe(recording_id="Recording ID")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def record_delete(self, interaction: discord.Interaction, recording_id: int):
         with SessionLocal() as db:
             recording = db.get(VoiceRecording, recording_id)
             if not recording:
-                await ctx.respond(f"Recording #{recording_id} not found", ephemeral=True)
+                await interaction.response.send_message(
+                    f"Recording #{recording_id} not found", ephemeral=True
+                )
                 return
 
             tracks = db.query(VoiceRecordingTrack).filter(
@@ -218,8 +226,10 @@ class RecordingCommands(commands.Cog):
             db.delete(recording)
             db.commit()
 
-            await ctx.respond(f"Recording #{recording_id} deleted", ephemeral=True)
+            await interaction.response.send_message(
+                f"Recording #{recording_id} deleted", ephemeral=True
+            )
 
 
-def setup(bot: commands.Bot):
-    bot.add_cog(RecordingCommands(bot))
+async def setup(bot: commands.Bot):
+    await bot.add_cog(RecordingCommands(bot))
