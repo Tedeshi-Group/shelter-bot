@@ -27,6 +27,8 @@ class User(Base):
     steam_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     steam_nickname: Mapped[str | None] = mapped_column(String(255), nullable=True)
     steam_avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    blocked_sending: Mapped[bool] = mapped_column(default=False)  # blocked from sending tokens
+    blocked_creating: Mapped[bool] = mapped_column(default=False)  # blocked from creating requests
 
     sessions: Mapped[list[VoiceSession]] = relationship(back_populates="user")
     messages: Mapped[list[MessageCounter]] = relationship(back_populates="user")
