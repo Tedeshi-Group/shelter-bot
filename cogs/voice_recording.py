@@ -311,6 +311,18 @@ class WorkerBot:
         self._channel_name = None
         return result
 
+    def get_status(self) -> dict[str, Any]:
+        elapsed = 0
+        if self.recorder and self.recorder.start_time:
+            elapsed = int((datetime.now(timezone.utc) - self.recorder.start_time).total_seconds())
+        return {
+            "worker_id": self.worker_id,
+            "is_busy": self.is_busy,
+            "channel_id": self._channel_id,
+            "channel_name": self._channel_name,
+            "elapsed_seconds": elapsed,
+        }
+
     async def stop(self):
         if self.recorder and self.recorder.is_recording:
             await self.recorder.stop()
