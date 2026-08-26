@@ -22,3 +22,4 @@ jobs:
             pip install -r requirements.txt --no-cache-dir
             alembic upgrade head
             sudo systemctl restart shelter-bot
+            sudo systemctl restart voice-bot
