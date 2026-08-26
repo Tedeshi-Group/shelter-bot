@@ -313,8 +313,8 @@ class WorkerBot:
 
     def get_status(self) -> dict[str, Any]:
         elapsed = 0
-        if self.recorder and self.recorder.start_time:
-            elapsed = int((datetime.now(timezone.utc) - self.recorder.start_time).total_seconds())
+        if self.recorder and self.recorder._start_time:
+            elapsed = int((datetime.now(timezone.utc) - self.recorder._start_time).total_seconds())
         return {
             "worker_id": self.worker_id,
             "is_busy": self.is_busy,
