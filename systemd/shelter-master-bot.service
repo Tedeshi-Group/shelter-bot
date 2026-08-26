@@ -1,0 +1,15 @@
+[Unit]
+Description=Shelter Master Bot (Voice Recording Orchestra)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/shelter-bot
+ExecStart=/home/shelter-bot/.venv/bin/python master_bot.py
+Restart=on-failure
+RestartSec=5
+Environment=PATH=/home/shelter-bot/.venv/bin
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 import discord
@@ -8,6 +9,8 @@ from sqlalchemy import select, text
 from achievements import check_achievements
 from database import AsyncSessionLocal
 from models import MessageCounter, User, VoiceSession
+
+logger = logging.getLogger(__name__)
 
 VOICE_CATEGORY_ID = 1517577490368041200
 ARCHIVE_CHANNEL_ID = 1429769594037600267
