@@ -348,8 +348,8 @@ async def avatar(interaction: discord.Interaction, member: discord.Member):
     has_guild_avatar = member.display_avatar.url != member.avatar.url
 
     if has_guild_avatar:
-        global_url = member.avatar.with_format('gif').with_size(512).url
-        guild_url = member.display_avatar.with_format('gif').with_size(512).url
+        global_url = member.avatar.with_size(512).url
+        guild_url = member.display_avatar.with_size(512).url
 
         embed = discord.Embed(
             title=f'Аватарки — {member.display_name}',
@@ -365,7 +365,7 @@ async def avatar(interaction: discord.Interaction, member: discord.Member):
 
         await interaction.response.send_message(embeds=[embed, embed2])
     else:
-        avatar_url = member.avatar.with_format('gif').with_size(512).url
+        avatar_url = member.avatar.with_size(512).url
         embed = discord.Embed(
             title=f'Аватар — {member.display_name}',
             color=color,
