@@ -335,4 +335,44 @@ async def setrole(interaction: discord.Interaction, achievement: str, level: int
     )
 
 
+@bot.tree.command(name='avatar', description='Показать аватар пользователя (только админы)')
+@app_commands.describe(member='Участник сервера')
+async def avatar(interaction: discord.Interaction, member: discord.Member):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message('Только администраторы могут использовать эту команду.', ephemeral=True)
+        return
+
+    color = member.accent_color or discord.Color.greyple()
+
+    # display_avatar учитывает серверную аватарку, user.display_avatar — глобальную
+    has_guild_avatar = member.display_avatar.url != member.user.display_avatar.url
+
+    if has_guild_avatar:
+        global_url = member.user.display_avatar.with_format('gif').with_size(512).url
+        guild_url = member.display_avatar.with_format('gif').with_size(512).url
+
+        embed = discord.Embed(
+            title=f'Аватарки — {member.display_name}',
+            color=color,
+        )
+        embed.set_image(url=global_url)
+        embed.add_field(name='Основной аватар', value=f'[Ссылка]({global_url})', inline=True)
+        embed.add_field(name='Аватар сервера', value=f'[Ссылка]({guild_url})', inline=True)
+
+        embed2 = discord.Embed(color=color)
+        embed2.set_image(url=guild_url)
+        embed2.set_footer(text='Аватар сервера')
+
+        await interaction.response.send_message(embeds=[embed, embed2])
+    else:
+        avatar_url = member.display_avatar.with_format('gif').with_size(512).url
+        embed = discord.Embed(
+            title=f'Аватар — {member.display_name}',
+            color=color,
+        )
+        embed.set_image(url=avatar_url)
+        embed.set_footer(text='Основной аватар')
+        await interaction.response.send_message(embed=embed)
+
+
 bot.run(TOKEN)
