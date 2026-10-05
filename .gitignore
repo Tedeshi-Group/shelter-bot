@@ -219,3 +219,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local SQLite database (the running bot writes to it; never version it)
+shelter_bot.db
+shelter_bot.db-*
+
+# MiMo Desktop local state: plans, cron locks, scratch scripts
+.mimocode/
