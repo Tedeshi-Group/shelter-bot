@@ -13,7 +13,6 @@ from models import MessageCounter, User, VoiceSession
 logger = logging.getLogger(__name__)
 
 VOICE_CATEGORY_ID = 1517577490368041200
-ARCHIVE_CHANNEL_ID = 1429769594037600267
 LOG_CHANNEL_ID = 1517446069192102003
 VOICE_CHANNEL_PREFIX = "голосовой #"
 NEW_VOICE_NAME = "новый войс"
@@ -118,6 +117,7 @@ class VoiceChannels(commands.Cog):
         self.bot = bot
         self.active_timers: dict[int, asyncio.Task] = {}
         self.deaf_states: dict[int, set[int]] = {}  # channel_id -> set of member ids
+        self.voice_threads: dict[int, int] = {}  # voice channel_id -> archive thread id
         self.bot.add_view(DeafView(self))
 
     @commands.Cog.listener()
@@ -272,43 +272,38 @@ class VoiceChannels(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot:
+        if message.author.bot or message.guild is None:
             return
 
+        if isinstance(message.channel, discord.VoiceChannel):
+            await self._archive_voice_text_message(message)
+        elif not self._is_log_channel(message.channel):
+            await self._archive_offvoice_message(message)
+
+    async def _archive_voice_text_message(self, message: discord.Message):
+        """Сообщение, отправленное в текстовом канале самого войса."""
         channel = message.channel
-        if not isinstance(channel, discord.VoiceChannel):
-            return
-
         if channel.category_id != VOICE_CATEGORY_ID:
             return
 
         if not channel.name.startswith(VOICE_CHANNEL_PREFIX):
             return
 
-        if not hasattr(self, '_voice_threads') or channel.id not in self._voice_threads:
-            return
-
-        archive_channel = self.bot.get_channel(ARCHIVE_CHANNEL_ID)
-        if not archive_channel:
-            return
-
-        thread = archive_channel.get_thread(self._voice_threads[channel.id])
-        if not thread:
-            return
-
-        try:
-            embed = discord.Embed(
-                description=message.content or "",
-                color=discord.Color.greyple(),
-            )
-            embed.set_author(
-                name=message.author.display_name,
-                icon_url=message.author.display_avatar.url,
-            )
-            files = [await a.to_file() for a in message.attachments]
-            await thread.send(embed=embed, files=files)
-        except (discord.NotFound, discord.HTTPException):
-            pass
+        thread = self._get_voice_thread(channel)
+        if thread:
+            try:
+                embed = discord.Embed(
+                    description=message.content or "",
+                    color=discord.Color.greyple(),
+                )
+                embed.set_author(
+                    name=message.author.display_name,
+                    icon_url=message.author.display_avatar.url,
+                )
+                files = [await a.to_file() for a in message.attachments]
+                await thread.send(embed=embed, files=files)
+            except (discord.NotFound, discord.HTTPException):
+                pass
 
         # Count message
         async with AsyncSessionLocal() as db:
@@ -330,6 +325,50 @@ class VoiceChannels(commands.Cog):
 
         # Check message achievements
         await self._check_and_notify_achievements(message.author, ["messages_total"])
+
+    async def _archive_offvoice_message(self, message: discord.Message):
+        """Сообщение в обычном текстовом канале от того, кто сейчас сидит в войсе."""
+        author = message.author
+        voice_channel = None
+        if isinstance(author, discord.Member) and author.voice:
+            voice_channel = author.voice.channel
+
+        if voice_channel is None:
+            return
+
+        thread = self._get_voice_thread(voice_channel)
+        if thread is None:
+            return
+
+        try:
+            embed = discord.Embed(
+                title="💬 Сообщение вне войса",
+                url=message.jump_url,
+                description=message.content or "*[без текста]*",
+                color=discord.Color.dark_teal(),
+                timestamp=message.created_at,
+            )
+            embed.set_author(name=author.display_name, icon_url=author.display_avatar.url)
+            embed.set_footer(text=f"Написал в #{message.channel.name}, пока был в войсе")
+            files = [await a.to_file() for a in message.attachments]
+            await thread.send(embed=embed, files=files)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
+    def _is_log_channel(self, channel: discord.abc.Messageable) -> bool:
+        """Канал логов и его треды — туда бот пишет сам, логировать не нужно."""
+        return LOG_CHANNEL_ID in (channel.id, getattr(channel, "parent_id", None))
+
+    def _get_voice_thread(self, channel: discord.VoiceChannel) -> discord.Thread | None:
+        thread_id = self.voice_threads.get(channel.id)
+        if thread_id is None:
+            return None
+
+        log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
+        if not log_channel:
+            return None
+
+        return log_channel.get_thread(thread_id)
 
     async def _handle_new_voice_join(self, channel: discord.VoiceChannel, creator: discord.Member):
         category = channel.category
@@ -365,9 +404,6 @@ class VoiceChannels(commands.Cog):
         await channel.set_permissions(creator, overwrite=overwrite)
 
         # Создать архивный тред для этого войса
-        if not hasattr(self, '_voice_threads'):
-            self._voice_threads = {}
-
         log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             try:
@@ -375,7 +411,7 @@ class VoiceChannels(commands.Cog):
                     name=new_name,
                     type=discord.ChannelType.private_thread,
                 )
-                self._voice_threads[channel.id] = thread.id
+                self.voice_threads[channel.id] = thread.id
 
                 create_embed = discord.Embed(
                     title="🔊 Голосовой канал создан",
@@ -400,15 +436,8 @@ class VoiceChannels(commands.Cog):
         await channel.send(embed=deaf_embed, view=DeafView(self))
 
     async def _log_voice_event(self, channel: discord.VoiceChannel, member: discord.Member, action: str, color: discord.Color):
-        if not hasattr(self, '_voice_threads') or channel.id not in self._voice_threads:
-            return
-
-        log_channel = self.bot.get_channel(LOG_CHANNEL_ID)
-        if not log_channel:
-            return
-
-        thread = log_channel.get_thread(self._voice_threads[channel.id])
-        if not thread:
+        thread = self._get_voice_thread(channel)
+        if thread is None:
             return
 
         embed = discord.Embed(
@@ -467,8 +496,7 @@ class VoiceChannels(commands.Cog):
         if channel.members:
             return
 
-        if hasattr(self, '_voice_threads') and channel.id in self._voice_threads:
-            del self._voice_threads[channel.id]
+        self.voice_threads.pop(channel.id, None)
 
         try:
             await channel.delete(reason="Voice channel empty for 10 seconds")
